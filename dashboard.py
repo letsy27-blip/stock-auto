@@ -1,4 +1,6 @@
+import os
 import re
+import json
 import sqlite3
 from datetime import date, datetime, timedelta
 from urllib.parse import quote
@@ -8,6 +10,12 @@ import plotly.express as px
 import streamlit as st
 
 from ai.gemini_client import DEFAULT_MODEL, stream_chat
+from kis_api import get_access_token
+from market_data import get_market_overview
+from sector_theme_strength import (
+    make_industry_strength,
+    make_theme_strength,
+)
 
 DB_NAME = "stock_data.db"
 
@@ -16,14 +24,15 @@ st.set_page_config(page_title="주식 추천 대시보드", layout="wide")
 st.markdown(
     """
     <style>
-    div[data-testid="stDialog"] div[role="dialog"] {
-        width: 1200px !important;
-        max-width: 95vw !important;
+    div[data-testid="stDialog"] div[role="dialog"],
+    div[data-testid="stDialog"] > div,
+    div[role="dialog"] {
+        width: min(1400px, 96vw) !important;
+        max-width: 96vw !important;
     }
 
-    div[data-testid="stDialog"] {
-        width: 1200px !important;
-        max-width: 95vw !important;
+    div[data-testid="stDialog"] div[role="dialog"] > div {
+        max-width: none !important;
     }
 
     .metric-card {
@@ -42,18 +51,24 @@ st.markdown(
     }
 
     .metric-value {
-        font-size: 28px;
+        font-size: clamp(20px, 2vw, 28px);
         color: #111827;
         font-weight: 600;
-        white-space: nowrap;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: keep-all;
+        line-height: 1.2;
     }
 
     .stock-grade {
-        font-size: 28px;
+        font-size: clamp(20px, 2vw, 28px);
         color: #111827;
         font-weight: 600;
-        white-space: nowrap;
-        letter-spacing: 1px;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-all;
+        line-height: 1.2;
+        letter-spacing: 0;
     }
 
     .normal-text {
@@ -89,6 +104,74 @@ st.markdown(
         border-bottom: 1px solid #E5E7EB;
         padding: 8px 0;
     }
+
+    /* TOP30 클릭 텍스트: 버튼 기능은 유지하고 링크처럼 표시 */
+    [class*="st-key-stock_link_"] button,
+    [class*="st-key-trading_link_"] button,
+    [class*="st-key-news_good_"] button,
+    [class*="st-key-news_bad_"] button,
+    [class*="st-key-news_neutral_"] button,
+    [class*="st-key-news_none_"] button,
+    [class*="st-key-news_unanalyzed_"] button {
+        background: transparent !important;
+        border: 0 !important;
+        box-shadow: none !important;
+        padding: 0 !important;
+        min-height: 0 !important;
+        height: auto !important;
+        width: auto !important;
+        justify-content: flex-start !important;
+        text-align: left !important;
+        font-size: 16px !important;
+        font-weight: 500 !important;
+        line-height: 1.35 !important;
+        white-space: normal !important;
+        word-break: keep-all !important;
+        color: #111827 !important;
+    }
+
+    [class*="st-key-stock_link_"] button:hover,
+    [class*="st-key-trading_link_"] button:hover,
+    [class*="st-key-news_good_"] button:hover,
+    [class*="st-key-news_bad_"] button:hover,
+    [class*="st-key-news_neutral_"] button:hover,
+    [class*="st-key-news_none_"] button:hover,
+    [class*="st-key-news_unanalyzed_"] button:hover {
+        color: #2563EB !important;
+        text-decoration: underline !important;
+        background: transparent !important;
+        border: 0 !important;
+    }
+
+    [class*="st-key-stock_link_"] button:focus,
+    [class*="st-key-trading_link_"] button:focus,
+    [class*="st-key-news_good_"] button:focus,
+    [class*="st-key-news_bad_"] button:focus,
+    [class*="st-key-news_neutral_"] button:focus,
+    [class*="st-key-news_none_"] button:focus,
+    [class*="st-key-news_unanalyzed_"] button:focus {
+        box-shadow: none !important;
+        outline: none !important;
+    }
+
+    [class*="st-key-news_good_"] button {
+        color: #15803D !important;
+    }
+
+    [class*="st-key-news_bad_"] button {
+        color: #DC2626 !important;
+    }
+
+    [class*="st-key-news_neutral_"] button,
+    [class*="st-key-news_none_"] button,
+    [class*="st-key-news_unanalyzed_"] button {
+        color: #6B7280 !important;
+    }
+
+    [class*="st-key-trading_link_"] button {
+        color: #374151 !important;
+    }
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -101,11 +184,352 @@ st.markdown(
 def load_table(table_name: str) -> pd.DataFrame:
     conn = sqlite3.connect(DB_NAME)
     try:
-        df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+        df = pd.read_sql(f'SELECT * FROM "{table_name}"', conn)
     except Exception:
         df = pd.DataFrame()
     conn.close()
     return df
+# -----------------------------
+# DB 상태 검사
+# -----------------------------
+def get_db_status() -> dict:
+    """SQLite DB의 기본 상태를 검사해서 딕셔너리로 반환한다."""
+
+    result = {
+        "exists": False,
+        "size_mb": 0.0,
+        "modified_at": None,
+        "tables": [],
+        "table_counts": {},
+        "latest_dates": {},
+        "duplicate_counts": {},
+        "errors": [],
+    }
+
+    if not os.path.exists(DB_NAME):
+        result["errors"].append(f"DB 파일을 찾을 수 없습니다: {DB_NAME}")
+        return result
+
+    result["exists"] = True
+    result["size_mb"] = os.path.getsize(DB_NAME) / (1024 * 1024)
+    result["modified_at"] = datetime.fromtimestamp(
+        os.path.getmtime(DB_NAME)
+    )
+
+    conn = None
+
+    try:
+        conn = sqlite3.connect(DB_NAME)
+
+        table_df = pd.read_sql_query(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT LIKE 'sqlite_%'
+            ORDER BY name
+            """,
+            conn,
+        )
+
+        tables = table_df["name"].tolist()
+        result["tables"] = tables
+
+        for table_name in tables:
+            try:
+                count = conn.execute(
+                    f'SELECT COUNT(*) FROM "{table_name}"'
+                ).fetchone()[0]
+
+                result["table_counts"][table_name] = int(count)
+
+                column_df = pd.read_sql_query(
+                    f'PRAGMA table_info("{table_name}")',
+                    conn,
+                )
+
+                columns = column_df["name"].tolist()
+
+                # 저장일자 또는 날짜가 있으면 최신 날짜 확인
+                date_column = None
+
+                for candidate in [
+                    "저장일자",
+                    "날짜",
+                    "기준일자",
+                    "거래일자",
+                ]:
+                    if candidate in columns:
+                        date_column = candidate
+                        break
+
+                if date_column:
+                    latest_value = conn.execute(
+                        f'''
+                        SELECT MAX("{date_column}")
+                        FROM "{table_name}"
+                        '''
+                    ).fetchone()[0]
+
+                    result["latest_dates"][table_name] = latest_value
+
+            except Exception as table_error:
+                result["errors"].append(
+                    f"{table_name} 검사 실패: {table_error}"
+                )
+
+        # 주요 테이블 중복 검사
+        duplicate_rules = {
+            "stock_master": ["종목코드"],
+            "score_history": ["저장일자", "종목코드"],
+            "chart_history": ["날짜", "종목코드"],
+        }
+
+        for table_name, keys in duplicate_rules.items():
+            if table_name not in tables:
+                continue
+
+            column_df = pd.read_sql_query(
+                f'PRAGMA table_info("{table_name}")',
+                conn,
+            )
+            columns = column_df["name"].tolist()
+
+            existing_keys = [
+                key for key in keys if key in columns
+            ]
+
+            if len(existing_keys) != len(keys):
+                continue
+
+            key_sql = ", ".join(
+                f'"{key}"' for key in existing_keys
+            )
+
+            duplicate_query = f"""
+                SELECT COALESCE(SUM(duplicate_count - 1), 0)
+                FROM (
+                    SELECT COUNT(*) AS duplicate_count
+                    FROM "{table_name}"
+                    GROUP BY {key_sql}
+                    HAVING COUNT(*) > 1
+                )
+            """
+
+            duplicate_count = conn.execute(
+                duplicate_query
+            ).fetchone()[0]
+
+            result["duplicate_counts"][table_name] = int(
+                duplicate_count or 0
+            )
+
+    except sqlite3.DatabaseError as db_error:
+        result["errors"].append(f"DB 오류: {db_error}")
+
+    except Exception as error:
+        result["errors"].append(f"검사 오류: {error}")
+
+    finally:
+        if conn is not None:
+            conn.close()
+
+    return result
+
+
+def calculate_db_health(status: dict) -> tuple[int, str]:
+    """DB 상태를 100점 만점으로 계산한다."""
+
+    score = 100
+
+    if not status["exists"]:
+        return 0, "DB 없음"
+
+    if status["errors"]:
+        score -= min(len(status["errors"]) * 15, 60)
+
+    if not status["tables"]:
+        score -= 40
+
+    empty_tables = sum(
+        1
+        for count in status["table_counts"].values()
+        if count == 0
+    )
+    score -= min(empty_tables * 5, 20)
+
+    total_duplicates = sum(
+        status["duplicate_counts"].values()
+    )
+    if total_duplicates > 0:
+        score -= min(10 + total_duplicates, 30)
+
+    score = max(0, score)
+
+    if score >= 90:
+        grade = "매우 양호"
+    elif score >= 75:
+        grade = "양호"
+    elif score >= 50:
+        grade = "주의"
+    else:
+        grade = "점검 필요"
+
+    return score, grade
+
+
+def show_db_status():
+    """Streamlit DB 상태 화면을 표시한다."""
+
+    table_name_map = {
+        "chart_history": "차트 이력",
+        "portfolio": "보유 종목",
+        "portfolio_history": "포트폴리오 이력",
+        "rise_rank": "상승률 순위",
+        "rise_rank_history": "상승률 순위 이력",
+        "score_history": "추천 점수 이력",
+        "signal": "매매 신호",
+        "signal_history": "매매 신호 이력",
+        "stock_master": "종목 마스터",
+        "trade_value_rank": "거래대금 순위",
+        "trade_value_rank_history": "거래대금 순위 이력",
+        "volume_rank": "거래량 순위",
+        "volume_rank_history": "거래량 순위 이력",
+        "supply_demand_history": "투자자 수급 이력",
+        "news_history": "뉴스 원본 이력",
+        "news_ai_summary": "AI 뉴스 분석 요약",
+        "score_current": "현재 추천 점수",
+        "stock_classification": "종목 업종·테마 분류",
+        "stock_theme_history": "종목 테마 변경 이력",
+        "intraday_snapshot": "장중 30분 스냅샷",
+        "market_event_history": "장중 주요 이벤트",
+    }
+
+    st.header("DB 상태")
+
+    status = get_db_status()
+    health_score, health_grade = calculate_db_health(status)
+
+    if not status["exists"]:
+        st.error(f"`{DB_NAME}` 파일을 찾을 수 없습니다.")
+        return
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric(
+        "DB 파일",
+        "정상",
+    )
+
+    col2.metric(
+        "DB 크기",
+        f'{status["size_mb"]:.2f} MB',
+    )
+
+    modified_text = (
+        status["modified_at"].strftime("%Y-%m-%d %H:%M:%S")
+        if status["modified_at"]
+        else "-"
+    )
+
+    col3.metric(
+        "마지막 파일 변경",
+        modified_text,
+    )
+
+    col4.metric(
+        "DB 건강도",
+        f"{health_score}점",
+        health_grade,
+    )
+
+    st.subheader("테이블 현황")
+    st.caption(
+        "중복 데이터는 같은 기준키가 두 번 이상 저장된 행입니다. "
+        "검사 대상이 아닌 테이블은 '검사 대상 아님'으로 표시됩니다."
+    )
+
+    table_rows = []
+
+    for table_name in status["tables"]:
+        row_count = status["table_counts"].get(
+            table_name, 0
+        )
+
+        latest_date = status["latest_dates"].get(
+            table_name, "-"
+        )
+
+        duplicate_count = status["duplicate_counts"].get(
+            table_name, "-"
+        )
+
+        duplicate_text = (
+            f"{duplicate_count:,}건"
+            if isinstance(duplicate_count, int)
+            else "검사 대상 아님"
+        )
+
+        table_rows.append(
+            {
+                "테이블": table_name_map.get(table_name, table_name),
+                "DB 테이블명": table_name,
+                "데이터 건수": row_count,
+                "최신 날짜": latest_date,
+                "중복 데이터": duplicate_text,
+            }
+        )
+
+    if table_rows:
+        table_status_df = pd.DataFrame(table_rows)
+
+        st.dataframe(
+            table_status_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.warning("DB에 테이블이 없습니다.")
+
+    total_rows = sum(status["table_counts"].values())
+    total_duplicates = sum(
+        status["duplicate_counts"].values()
+    )
+
+    summary_col1, summary_col2, summary_col3 = st.columns(3)
+
+    summary_col1.metric(
+        "전체 테이블",
+        f'{len(status["tables"])}개',
+    )
+
+    summary_col2.metric(
+        "전체 데이터",
+        f"{total_rows:,}건",
+    )
+
+    summary_col3.metric(
+        "확인된 중복 데이터",
+        f"{total_duplicates:,}건",
+    )
+
+    if status["errors"]:
+        st.subheader("검사 중 발견된 문제")
+
+        for error in status["errors"]:
+            st.error(error)
+
+    elif total_duplicates > 0:
+        st.warning(
+            "일부 테이블에서 중복 데이터가 발견됐습니다. "
+            "아직 자동 삭제하지는 않습니다."
+        )
+
+    else:
+        st.success("기본 DB 검사 결과 이상이 없습니다.")
+
+    if st.button("DB 다시 검사", use_container_width=True):
+        st.rerun()
 
 
 def safe_float(value, default=0.0) -> float:
@@ -203,16 +627,219 @@ def normalize_master_df(master_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def normalize_classification_df(
+    classification_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if classification_df is None or classification_df.empty:
+        return pd.DataFrame()
+
+    df = classification_df.copy()
+
+    if "종목코드" in df.columns:
+        df["종목코드"] = (
+            df["종목코드"]
+            .astype(str)
+            .str.replace(".0", "", regex=False)
+            .str.zfill(6)
+        )
+
+    return df
+
+
+def normalize_theme_history_df(
+    theme_history_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if theme_history_df is None or theme_history_df.empty:
+        return pd.DataFrame()
+
+    df = theme_history_df.copy()
+
+    if "종목코드" in df.columns:
+        df["종목코드"] = (
+            df["종목코드"]
+            .astype(str)
+            .str.replace(".0", "", regex=False)
+            .str.zfill(6)
+        )
+
+    if "기준일자" in df.columns:
+        df["기준일자"] = pd.to_datetime(
+            df["기준일자"],
+            errors="coerce",
+        )
+
+    return df
+
+
+def _theme_text(value) -> str:
+    themes = _json_list(value)
+    return ", ".join(str(theme) for theme in themes) if themes else "-"
+
+
+def show_classification_summary(
+    classification_df: pd.DataFrame,
+    theme_history_df: pd.DataFrame,
+    latest_score: pd.Series,
+    stock_code: str,
+):
+    code = clean_code(stock_code)
+    classification = pd.Series(dtype="object")
+
+    if (
+        classification_df is not None
+        and not classification_df.empty
+        and "종목코드" in classification_df.columns
+    ):
+        matched = classification_df[
+            classification_df["종목코드"] == code
+        ]
+        if not matched.empty:
+            classification = matched.iloc[-1]
+
+    industry = str(
+        classification.get(
+            "업종",
+            latest_score.get("업종", ""),
+        )
+        or ""
+    ).strip()
+
+    representative_theme = str(
+        classification.get(
+            "대표테마",
+            latest_score.get("대표테마", ""),
+        )
+        or ""
+    ).strip()
+
+    theme_json = classification.get(
+        "테마JSON",
+        latest_score.get("테마JSON", "[]"),
+    )
+    confidence = int(
+        safe_float(
+            classification.get(
+                "분류신뢰도",
+                latest_score.get("분류신뢰도", 0),
+            )
+        )
+    )
+    theme_checked = str(
+        classification.get(
+            "테마확인일자",
+            latest_score.get("테마확인일자", ""),
+        )
+        or ""
+    ).strip()
+
+    st.subheader("업종·테마")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        metric_card("업종", industry or "미분류")
+    with col2:
+        metric_card("대표테마", representative_theme or "미분류")
+    with col3:
+        metric_card("분류 신뢰도", f"{confidence}%")
+
+    st.caption(
+        f"테마 목록: {_theme_text(theme_json)}"
+        + (f" · 마지막 확인: {theme_checked}" if theme_checked else "")
+    )
+
+    reason = str(
+        classification.get(
+            "분류근거",
+            latest_score.get("분류근거", ""),
+        )
+        or ""
+    ).strip()
+    if reason:
+        st.info(reason)
+
+    if (
+        theme_history_df is None
+        or theme_history_df.empty
+        or "종목코드" not in theme_history_df.columns
+    ):
+        return
+
+    history = theme_history_df[
+        theme_history_df["종목코드"] == code
+    ].copy()
+
+    if history.empty:
+        return
+
+    sort_columns = [
+        column
+        for column in ["기준일자", "분석일시", "id"]
+        if column in history.columns
+    ]
+    if sort_columns:
+        history = history.sort_values(
+            sort_columns,
+            ascending=False,
+        )
+
+    display_columns = [
+        column
+        for column in [
+            "기준일자",
+            "대표테마",
+            "테마JSON",
+            "테마근거",
+            "테마신뢰도",
+            "분석일시",
+        ]
+        if column in history.columns
+    ]
+
+    with st.expander(f"테마 변경 이력 ({len(history)}건)"):
+        st.dataframe(
+            history[display_columns].head(30),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
 def make_stock_links(stock_name: str, stock_code: str):
     encoded_name = quote(str(stock_name))
     code = clean_code(stock_code)
+    is_naver_stock_code = bool(re.fullmatch(r"\d{6}", code))
 
     st.subheader("관련 링크")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.link_button("네이버증권", f"https://finance.naver.com/item/main.naver?code={code}")
-    col2.link_button("네이버 뉴스", f"https://search.naver.com/search.naver?where=news&query={encoded_name}")
-    col3.link_button("유튜브 검색", f"https://www.youtube.com/results?search_query={encoded_name}+주식")
-    col4.link_button("종목토론방", f"https://finance.naver.com/item/board.naver?code={code}")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    if is_naver_stock_code:
+        col1.link_button(
+            "실시간 시세·차트",
+            f"https://finance.naver.com/item/main.naver?code={code}",
+        )
+        col2.link_button(
+            "일봉 차트",
+            f"https://finance.naver.com/item/fchart.naver?code={code}",
+        )
+    else:
+        # KIS에는 영문이 포함된 ETF·ETN 등의 종목코드가 있다. 이 코드는
+        # 네이버증권의 6자리 숫자 코드가 아니므로 직접 링크하면 증권 홈으로
+        # 이동한다. 잘못된 링크 대신 종목명 검색을 제공한다.
+        col1.link_button(
+            "네이버 종목 검색",
+            f"https://search.naver.com/search.naver?query={encoded_name}+주식",
+        )
+        col2.caption("네이버 차트 직접 연결 미지원")
+    col3.link_button(
+        "네이버 뉴스",
+        f"https://search.naver.com/search.naver?where=news&query={encoded_name}",
+    )
+    col4.link_button(
+        "유튜브 검색",
+        f"https://www.youtube.com/results?search_query={encoded_name}+주식",
+    )
+    col5.link_button(
+        "종목토론방",
+        f"https://finance.naver.com/item/board.naver?code={code}",
+    )
 
 
 def metric_card(label: str, value, grade: bool = False):
@@ -231,70 +858,84 @@ def metric_card(label: str, value, grade: bool = False):
 # -----------------------------
 # 점수 설명
 # -----------------------------
-def show_metric_explainers(latest: pd.Series):
-    market_score = safe_float(latest.get("시장점수", latest.get("총점", 0)))
-    news_score = safe_float(latest.get("뉴스점수", 0))
-    ai_score = safe_float(latest.get("AI점수", 0))
-    final_score = safe_float(latest.get("최종점수", latest.get("총점", 0)))
-    rsi = safe_float(latest.get("RSI", 0))
-    grade = latest.get("등급", "")
-    recommend = latest.get("최종추천", "")
 
-    market_cols = [
-        "거래량점수", "상승률점수", "거래대금점수",
-        "20일수익률점수", "60일수익률점수", "거래량증가점수",
-        "정배열점수", "신고가점수", "RSI점수", "MACD점수",
+def show_metric_explainers(latest: pd.Series):
+    final_score = safe_float(
+        latest.get("최종점수", latest.get("총점", 0))
+    )
+    grade = str(latest.get("등급", "") or "")
+    recommend = str(latest.get("최종추천", "") or "")
+    ai_reason = str(latest.get("AI추천사유", "") or "").strip()
+
+    st.subheader("최종 평가")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("최종점수", f"{final_score:g}점")
+    col2.metric("등급", grade or "-")
+    col3.metric("최종추천", recommend or "-")
+
+    if ai_reason:
+        st.markdown("#### 추천 사유")
+        reason_items = [
+            item.strip()
+            for item in re.split(r"[,|\n]+", ai_reason)
+            if item.strip()
+        ]
+        for item in reason_items:
+            st.write(item)
+
+    exclusion_reason = str(
+        latest.get("추천제외사유", "")
+    ).strip()
+
+    if recommend in {"제외", "약세"} or final_score < 55:
+        st.markdown("#### 추천 제외 사유")
+        if exclusion_reason:
+            reasons = [
+                reason.strip()
+                for reason in exclusion_reason.split("|")
+                if reason.strip()
+            ]
+            for reason in reasons:
+                st.write(reason)
+        else:
+            st.write("관찰 등급 이상 기준에 미달했습니다.")
+
+    st.markdown("#### 점수 구성")
+
+    score_rows = [
+        ("거래량 순위", "거래량점수"),
+        ("상승률 순위", "상승률점수"),
+        ("거래대금 순위", "거래대금점수"),
+        ("20일 추세", "20일수익률점수"),
+        ("60일 추세", "60일수익률점수"),
+        ("거래량 증가", "거래량증가점수"),
+        ("이동평균 정배열", "정배열점수"),
+        ("60일 신고가", "신고가점수"),
+        ("RSI", "RSI점수"),
+        ("MACD", "MACD점수"),
     ]
 
-    with st.expander(f"시장점수 {market_score:g}점인 이유"):
-        rows = []
-        for col in market_cols:
-            if col in latest.index:
-                rows.append({"항목": col, "점수": latest.get(col, 0)})
-        st.write("시장 순위와 기술지표 점수를 합산한 값입니다.")
-        if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    breakdown = []
+    for label, column in score_rows:
+        if column in latest.index:
+            breakdown.append(
+                {
+                    "항목": label,
+                    "반영점수": round(
+                        safe_float(latest.get(column, 0)),
+                        2,
+                    ),
+                }
+            )
 
-    with st.expander(f"뉴스점수 {news_score:+g}점 / AI점수 {ai_score:+g}점"):
-        st.write("뉴스점수는 호재·악재 평가값이며, AI점수는 향후 별도 AI 평가에 사용합니다.")
-        st.write(f"점수변동사유: {latest.get('점수변동사유', '기록 없음')}")
+    if breakdown:
+        st.dataframe(
+            pd.DataFrame(breakdown),
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    with st.expander(f"최종점수 {final_score:g}점, 등급 {grade}인 이유"):
-        st.write("최종점수 = 시장점수 + 뉴스점수 + AI점수이며 0~100점 범위로 제한합니다.")
-        st.write("85점 이상: ★★★★★")
-        st.write("70점 이상: ★★★★☆")
-        st.write("55점 이상: ★★★☆☆")
-        st.write("40점 이상: ★★☆☆☆")
-        st.write("40점 미만: ★☆☆☆☆")
-
-    with st.expander(f"최종추천 '{recommend}'인 이유"):
-        if final_score >= 85:
-            st.write("85점 이상이라 강력관심입니다.")
-        elif final_score >= 70:
-            st.write("70점 이상이라 관심입니다.")
-        elif final_score >= 55:
-            st.write("55점 이상이라 관찰입니다.")
-        elif final_score >= 40:
-            st.write("40점 이상이라 약세입니다.")
-        else:
-            st.write("40점 미만이라 제외입니다.")
-
-    with st.expander(f"RSI {rsi:g} 해석"):
-        if rsi >= 80:
-            st.write("RSI가 80 이상이라 과열 부담이 큽니다.")
-        elif rsi >= 70:
-            st.write("RSI가 70 이상이라 과열권에 가깝습니다.")
-        elif rsi >= 45:
-            st.write("RSI가 45~70 구간이라 과열 부담은 크지 않습니다.")
-        elif rsi >= 30:
-            st.write("RSI가 30~45 구간이라 약세 또는 과매도 근처입니다.")
-        else:
-            st.write("RSI가 30 미만이라 과매도 구간입니다.")
-
-
-# -----------------------------
-# 차트
-# -----------------------------
 def get_stock_chart_df(chart_df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
     if chart_df.empty or "종목코드" not in chart_df.columns:
         return pd.DataFrame()
@@ -342,10 +983,443 @@ def show_price_volume_charts(chart_df: pd.DataFrame, stock_name: str, stock_code
         st.plotly_chart(fig_volume, use_container_width=True)
 
 
+
+# -----------------------------
+# 수급·뉴스 상세 분석
+# -----------------------------
+def normalize_supply_df(supply_df: pd.DataFrame) -> pd.DataFrame:
+    if supply_df is None or supply_df.empty:
+        return pd.DataFrame()
+
+    df = supply_df.copy()
+
+    if "종목코드" in df.columns:
+        df["종목코드"] = (
+            df["종목코드"]
+            .astype(str)
+            .str.replace(".0", "", regex=False)
+            .str.zfill(6)
+        )
+
+    if "날짜" in df.columns:
+        df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
+
+    for column in [
+        "외국인순매수량",
+        "기관순매수량",
+        "개인순매수량",
+        "종가",
+        "거래량",
+    ]:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0)
+
+    return df
+
+
+def normalize_news_df(news_df: pd.DataFrame) -> pd.DataFrame:
+    if news_df is None or news_df.empty:
+        return pd.DataFrame()
+
+    df = news_df.copy()
+
+    if "종목코드" in df.columns:
+        df["종목코드"] = (
+            df["종목코드"]
+            .astype(str)
+            .str.replace(".0", "", regex=False)
+            .str.zfill(6)
+        )
+
+    if "기사발행일시" in df.columns:
+        df["기사발행일시"] = pd.to_datetime(
+            df["기사발행일시"],
+            errors="coerce",
+        )
+
+    return df
+
+
+def format_signed_quantity(value) -> str:
+    number = int(safe_float(value, 0))
+    return f"{number:+,}주"
+
+
+def flow_label(value) -> str:
+    number = safe_float(value, 0)
+    if number > 0:
+        return "순매수"
+    if number < 0:
+        return "순매도"
+    return "중립"
+
+
+
+
+def show_supply_analysis(
+    supply_df: pd.DataFrame,
+    latest_score: pd.Series,
+    stock_code: str,
+):
+    st.subheader("매매동향")
+
+    code = clean_code(stock_code)
+    stock_supply = pd.DataFrame()
+
+    if supply_df is not None and not supply_df.empty:
+        stock_supply = supply_df[
+            supply_df["종목코드"] == code
+        ].copy()
+
+    foreign = safe_float(
+        latest_score.get("외국인순매수량", 0)
+    )
+    institution = safe_float(
+        latest_score.get("기관순매수량", 0)
+    )
+    personal = safe_float(
+        latest_score.get("개인순매수량", 0)
+    )
+    foreign_3d = int(
+        safe_float(latest_score.get("외국인3일합계", 0))
+    )
+    institution_3d = int(
+        safe_float(latest_score.get("기관3일합계", 0))
+    )
+    personal_3d = -(foreign_3d + institution_3d)
+    latest_date_text = str(
+        latest_score.get("수급기준일", "")
+    )
+    recent5 = pd.DataFrame()
+
+    if not stock_supply.empty:
+        stock_supply["날짜"] = pd.to_datetime(
+            stock_supply["날짜"],
+            errors="coerce",
+        )
+
+        for column in [
+            "외국인순매수량",
+            "기관순매수량",
+            "개인순매수량",
+        ]:
+            stock_supply[column] = pd.to_numeric(
+                stock_supply[column],
+                errors="coerce",
+            ).fillna(0)
+
+        stock_supply = (
+            stock_supply
+            .dropna(subset=["날짜"])
+            .sort_values("날짜")
+            .drop_duplicates(subset=["날짜"], keep="last")
+        )
+
+        if not stock_supply.empty:
+            latest = stock_supply.iloc[-1]
+            foreign = safe_float(
+                latest.get("외국인순매수량", 0)
+            )
+            institution = safe_float(
+                latest.get("기관순매수량", 0)
+            )
+            personal = safe_float(
+                latest.get("개인순매수량", 0)
+            )
+            latest_date_text = latest["날짜"].strftime(
+                "%Y-%m-%d"
+            )
+
+            recent3 = stock_supply.tail(3)
+            recent5 = stock_supply.tail(5)
+
+            foreign_3d = int(
+                recent3["외국인순매수량"].sum()
+            )
+            institution_3d = int(
+                recent3["기관순매수량"].sum()
+            )
+            personal_3d = int(
+                recent3["개인순매수량"].sum()
+            )
+
+    all_missing = (
+        foreign == 0
+        and institution == 0
+        and personal == 0
+    )
+
+    reflected_score = safe_float(
+        latest_score.get("수급점수", 0)
+    )
+
+    if all_missing:
+        st.info("매매동향 없음")
+        st.caption(
+            f"기준일: {latest_date_text or '확인 불가'} · "
+            "오늘 투자자별 매매 데이터가 제공되지 않았습니다."
+        )
+        st.metric("최종점수 반영", "0점")
+        return
+
+    st.caption(
+        f"기준일: {latest_date_text or '확인 불가'} · "
+        "양수는 순매수, 음수는 순매도입니다."
+    )
+
+    row1_col1, row1_col2, row1_col3 = st.columns(3)
+    row1_col1.metric(
+        f"외국인 {_trend_arrow(foreign)}",
+        format_signed_quantity(foreign),
+    )
+    row1_col2.metric(
+        f"기관 {_trend_arrow(institution)}",
+        format_signed_quantity(institution),
+    )
+    row1_col3.metric(
+        f"개인 {_trend_arrow(personal)}",
+        format_signed_quantity(personal),
+    )
+
+    row2_col1, row2_col2, row2_col3 = st.columns(3)
+    row2_col1.metric(
+        f"외국인 최근 3일 {_trend_arrow(foreign_3d)}",
+        format_signed_quantity(foreign_3d),
+    )
+    row2_col2.metric(
+        f"기관 최근 3일 {_trend_arrow(institution_3d)}",
+        format_signed_quantity(institution_3d),
+    )
+    row2_col3.metric(
+        f"개인 최근 3일 {_trend_arrow(personal_3d)}",
+        format_signed_quantity(personal_3d),
+    )
+
+    summary_col1, summary_col2 = st.columns(2)
+    summary_col1.metric(
+        "종합 판단",
+        str(latest_score.get("수급판단", "") or "중립"),
+    )
+    summary_col2.metric(
+        "최종점수 반영",
+        f"{reflected_score:+g}점",
+    )
+
+    if not recent5.empty:
+        chart_columns = [
+            column
+            for column in [
+                "외국인순매수량",
+                "기관순매수량",
+                "개인순매수량",
+            ]
+            if column in recent5.columns
+        ]
+
+        if chart_columns:
+            long_df = recent5.melt(
+                id_vars=["날짜"],
+                value_vars=chart_columns,
+                var_name="투자자",
+                value_name="순매수량",
+            )
+
+            fig = px.bar(
+                long_df,
+                x="날짜",
+                y="순매수량",
+                color="투자자",
+                barmode="group",
+                title="최근 5거래일 투자자별 매매동향",
+            )
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+            )
+
+        with st.expander("매매동향 원본 데이터 보기"):
+            st.dataframe(
+                stock_supply.sort_values(
+                    "날짜",
+                    ascending=False,
+                ).head(20),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+def _json_list(value):
+    if isinstance(value, list):
+        return value
+
+    try:
+        parsed = json.loads(str(value or "[]"))
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def show_news_analysis(
+    news_df: pd.DataFrame,
+    latest_score: pd.Series,
+    stock_code: str,
+):
+    st.subheader("AI 뉴스 분석")
+
+    code = clean_code(stock_code)
+    stock_news = pd.DataFrame()
+
+    if news_df is not None and not news_df.empty:
+        stock_news = news_df[
+            news_df["종목코드"] == code
+        ].copy()
+
+    news_score = safe_float(latest_score.get("뉴스점수", 0))
+    news_reason = str(
+        latest_score.get(
+            "뉴스분석사유",
+            latest_score.get("AI뉴스분석사유", ""),
+        )
+    ).strip()
+    news_summary = str(
+        latest_score.get(
+            "뉴스요약",
+            latest_score.get("AI뉴스요약", ""),
+        )
+    ).strip()
+    news_count = int(safe_float(latest_score.get("뉴스건수", 0)))
+    judgement = str(
+        latest_score.get(
+            "뉴스판단",
+            latest_score.get("AI뉴스판단", ""),
+        )
+    ).strip()
+    influence_period = str(
+        latest_score.get(
+            "영향기간",
+            latest_score.get("AI영향기간", ""),
+        )
+    ).strip()
+    confidence = int(
+        safe_float(
+            latest_score.get(
+                "신뢰도",
+                latest_score.get("AI신뢰도", 0),
+            )
+        )
+    )
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("뉴스점수", f"{news_score:+g}점")
+    col2.metric("AI 판단", judgement or "중립")
+    col3.metric("분석 뉴스", f"{news_count or len(stock_news)}건")
+    col4.metric("신뢰도", f"{confidence}%")
+
+    if news_summary and news_summary != "관련 뉴스 없음":
+        st.success(news_summary)
+    else:
+        st.info("최근 뉴스에서 뚜렷한 호재·악재가 확인되지 않았습니다.")
+
+    if news_reason and news_reason.lower() not in {"nan", "none"}:
+        st.write(f"**판단 근거:** {news_reason}")
+
+    if influence_period:
+        st.write(f"**예상 영향 기간:** {influence_period}")
+
+    positive_items = _json_list(
+        latest_score.get("긍정요인JSON", "[]")
+    )
+    negative_items = _json_list(
+        latest_score.get("부정요인JSON", "[]")
+    )
+    core_items = _json_list(
+        latest_score.get("핵심뉴스JSON", "[]")
+    )
+
+    if positive_items or negative_items:
+        pos_col, neg_col = st.columns(2)
+
+        with pos_col:
+            st.markdown("#### 긍정 요인")
+            if positive_items:
+                for item in positive_items:
+                    st.write(f"• {item}")
+            else:
+                st.write("뚜렷한 긍정 요인 없음")
+
+        with neg_col:
+            st.markdown("#### 부정·위험 요인")
+            if negative_items:
+                for item in negative_items:
+                    st.write(f"• {item}")
+            else:
+                st.write("뚜렷한 부정 요인 없음")
+
+    if core_items:
+        st.markdown("#### 핵심 뉴스")
+        for index, item in enumerate(core_items[:5], start=1):
+            if isinstance(item, dict):
+                title = item.get("제목", "")
+                decision = item.get("판단", "")
+                impact = item.get("영향도", "")
+                reason = item.get("근거", "")
+                st.markdown(
+                    f"**{index}. {title}**  \n"
+                    f"판단: {decision} · 영향도: {impact}  \n"
+                    f"{reason}"
+                )
+            else:
+                st.write(f"{index}. {item}")
+
+    if stock_news.empty:
+        st.warning(
+            "AI 뉴스 요약은 score_history에 남아 있지만 원본 뉴스 행은 news_history에서 찾지 못했습니다. "
+            "이 종목이 현재 후보 종목에 포함되지 않았거나, 최근 36시간 RSS 검색 결과가 없었거나, "
+            "새 Gemini 뉴스 코드 적용 전에 저장된 점수일 수 있습니다. "
+            "`python main.py`를 다시 실행하면 새 뉴스가 있을 때 원본도 함께 저장됩니다."
+        )
+        return
+
+    stock_news = stock_news.sort_values(
+        "기사발행일시",
+        ascending=False,
+    )
+
+    with st.expander(f"원본 뉴스 전체 보기 ({len(stock_news)}건)"):
+        for _, row in stock_news.head(50).iterrows():
+            title = str(row.get("뉴스제목", "")).strip()
+            source = str(row.get("언론사", "")).strip()
+            published = row.get("기사발행일시", "")
+            description = str(row.get("뉴스설명", "")).strip()
+            url = str(row.get("뉴스URL", "")).strip()
+
+            st.markdown(f"**{title}**")
+            st.caption(f"{source} · {published}")
+
+            if description:
+                st.write(description)
+
+            if url:
+                st.link_button(
+                    "기사 열기",
+                    url,
+                    key=f"news_{code}_{hash(url)}",
+                )
+
+            st.divider()
+
 # -----------------------------
 # 종목 상세
 # -----------------------------
-def show_stock_detail_by_code(score_df: pd.DataFrame, chart_df: pd.DataFrame, stock_name: str, stock_code: str):
+def show_stock_detail_by_code(
+    score_df: pd.DataFrame,
+    chart_df: pd.DataFrame,
+    supply_df: pd.DataFrame,
+    news_df: pd.DataFrame,
+    classification_df: pd.DataFrame,
+    theme_history_df: pd.DataFrame,
+    stock_name: str,
+    stock_code: str,
+):
     stock_code = clean_code(stock_code)
     stock_score_df = score_df[score_df["종목코드"] == stock_code].copy() if not score_df.empty else pd.DataFrame()
 
@@ -360,25 +1434,49 @@ def show_stock_detail_by_code(score_df: pd.DataFrame, chart_df: pd.DataFrame, st
     stock_score_df = stock_score_df.sort_values(["저장일자", "저장시간"])
     latest = stock_score_df.iloc[-1]
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        metric_card("시장점수", latest.get("시장점수", ""))
-    with col2:
-        metric_card("뉴스점수", f"{safe_float(latest.get('뉴스점수', 0)):+g}")
-    with col3:
-        metric_card("최종점수", latest.get("최종점수", latest.get("총점", "")))
-    with col4:
-        metric_card("최종추천", latest.get("최종추천", ""))
+    show_classification_summary(
+        classification_df=classification_df,
+        theme_history_df=theme_history_df,
+        latest_score=latest,
+        stock_code=stock_code,
+    )
 
-    col5, col6, col7, col8 = st.columns(4)
-    with col5:
-        metric_card("등급", latest.get("등급", ""), grade=True)
-    with col6:
+    st.divider()
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        metric_card(
+            "최종점수",
+            latest.get(
+                "최종점수",
+                latest.get("총점", ""),
+            ),
+        )
+    with col2:
+        metric_card(
+            "최종추천",
+            latest.get("최종추천", ""),
+        )
+    with col3:
+        metric_card(
+            "등급",
+            latest.get("등급", ""),
+            grade=True,
+        )
+
+    col4, col5, col6 = st.columns(3)
+    with col4:
         metric_card("RSI", latest.get("RSI", ""))
-    with col7:
-        metric_card("시장기준일", latest.get("시장기준일", ""))
-    with col8:
-        updated = f"{latest.get('최종갱신일자', '')} {latest.get('최종갱신시간', '')}".strip()
+    with col5:
+        metric_card(
+            "시장기준일",
+            latest.get("시장기준일", ""),
+        )
+    with col6:
+        updated = (
+            f"{latest.get('최종갱신일자', '')} "
+            f"{latest.get('최종갱신시간', '')}"
+        ).strip()
         metric_card("최종갱신", updated)
 
     change_reason = make_score_change_text(score_df, latest)
@@ -394,6 +1492,21 @@ def show_stock_detail_by_code(score_df: pd.DataFrame, chart_df: pd.DataFrame, st
         st.warning("저장된 관련 뉴스가 없습니다. 아래 네이버 뉴스 버튼으로 직접 확인하세요.")
 
     show_metric_explainers(latest)
+
+    st.divider()
+    show_supply_analysis(
+        supply_df=supply_df,
+        latest_score=latest,
+        stock_code=stock_code,
+    )
+
+    st.divider()
+    show_news_analysis(
+        news_df=news_df,
+        latest_score=latest,
+        stock_code=stock_code,
+    )
+
     make_stock_links(stock_name, stock_code)
 
     st.divider()
@@ -423,7 +1536,7 @@ def show_stock_detail_by_code(score_df: pd.DataFrame, chart_df: pd.DataFrame, st
     cols = [
         "저장일자", "저장시간", "시장기준일", "최종갱신일자", "최종갱신시간",
         "점수순위", "시장점수", "뉴스점수", "AI점수", "최종점수", "총점",
-        "등급", "최종추천", "점수변동사유", "AI추천사유",
+        "등급", "최종추천", "추천제외사유", "점수변동사유", "AI추천사유",
         "20일수익률(%)", "60일수익률(%)", "거래량증가율(%)",
         "정배열", "신고가돌파", "RSI", "MACD", "뉴스요약",
     ]
@@ -434,12 +1547,93 @@ def show_stock_detail_by_code(score_df: pd.DataFrame, chart_df: pd.DataFrame, st
 # -----------------------------
 # 팝업
 # -----------------------------
-def make_stock_dialog(score_df: pd.DataFrame, chart_df: pd.DataFrame):
-    @st.dialog("종목 상세 분석")
+def make_stock_dialog(
+    score_df: pd.DataFrame,
+    chart_df: pd.DataFrame,
+    supply_df: pd.DataFrame,
+    news_df: pd.DataFrame,
+    classification_df: pd.DataFrame,
+    theme_history_df: pd.DataFrame,
+):
+    @st.dialog("종목 상세 분석", width="large")
     def stock_detail_popup(stock_name: str, stock_code: str):
-        show_stock_detail_by_code(score_df, chart_df, stock_name, stock_code)
+        show_stock_detail_by_code(
+            score_df=score_df,
+            chart_df=chart_df,
+            supply_df=supply_df,
+            news_df=news_df,
+            classification_df=classification_df,
+            theme_history_df=theme_history_df,
+            stock_name=stock_name,
+            stock_code=stock_code,
+        )
 
     return stock_detail_popup
+
+
+def make_quick_analysis_dialogs(
+    score_df: pd.DataFrame,
+    supply_df: pd.DataFrame,
+    news_df: pd.DataFrame,
+):
+    def get_latest_score(stock_code: str) -> pd.Series:
+        code = clean_code(stock_code)
+
+        if (
+            score_df is None
+            or score_df.empty
+            or "종목코드" not in score_df.columns
+        ):
+            return pd.Series(dtype="object")
+
+        matched = score_df[
+            score_df["종목코드"] == code
+        ].copy()
+
+        if matched.empty:
+            return pd.Series(dtype="object")
+
+        sort_columns = [
+            column
+            for column in ["저장일자", "저장시간"]
+            if column in matched.columns
+        ]
+        if sort_columns:
+            matched = matched.sort_values(sort_columns)
+
+        return matched.iloc[-1]
+
+    @st.dialog("매매동향", width="large")
+    def trading_popup(stock_name: str, stock_code: str):
+        st.subheader(f"{stock_name} ({clean_code(stock_code)})")
+        latest_score = get_latest_score(stock_code)
+
+        if latest_score.empty:
+            st.warning("추천점수 데이터가 없습니다.")
+            return
+
+        show_supply_analysis(
+            supply_df=supply_df,
+            latest_score=latest_score,
+            stock_code=stock_code,
+        )
+
+    @st.dialog("뉴스 분석", width="large")
+    def news_popup(stock_name: str, stock_code: str):
+        st.subheader(f"{stock_name} ({clean_code(stock_code)})")
+        latest_score = get_latest_score(stock_code)
+
+        if latest_score.empty:
+            st.warning("추천점수 데이터가 없습니다.")
+            return
+
+        show_news_analysis(
+            news_df=news_df,
+            latest_score=latest_score,
+            stock_code=stock_code,
+        )
+
+    return trading_popup, news_popup
 
 
 def _format_change(value: float) -> str:
@@ -489,50 +1683,295 @@ def make_score_change_text(score_df: pd.DataFrame, current_row: pd.Series) -> st
     return " / ".join(parts)
 
 
+def make_news_status_text(row: pd.Series) -> str:
+    status = str(row.get("뉴스평가상태", "") or "").strip()
+    summary = str(row.get("뉴스요약", "") or "").strip()
+    reason = str(row.get("뉴스분석사유", "") or "").strip()
+    score = safe_float(row.get("뉴스점수", 0))
+
+    failed_words = ("실패", "오류", "quota", "429", "resource_exhausted")
+    combined = f"{status} {summary} {reason}".lower()
+
+    if any(word in combined for word in failed_words):
+        return "미분석"
+
+    if status in {"평가대기", "미분석"}:
+        return "미분석"
+
+    if status == "뉴스없음" or summary in {
+        "",
+        "관련 뉴스 없음",
+        "뉴스 조회 실패",
+        "종목명 없음",
+    }:
+        return "뉴스 없음"
+
+    if score > 0:
+        return "호재"
+    if score < 0:
+        return "악재"
+    return "중립"
+
+
+def _trend_arrow(value) -> str:
+    number = safe_float(value, 0)
+    if number > 0:
+        return "↑"
+    if number < 0:
+        return "↓"
+    return "-"
+
+
+def _latest_trading_values(
+    row: pd.Series,
+    supply_df: pd.DataFrame,
+    stock_code: str,
+) -> tuple[float, float, float, bool]:
+    foreign = safe_float(row.get("외국인순매수량", 0))
+    institution = safe_float(row.get("기관순매수량", 0))
+    personal = safe_float(row.get("개인순매수량", 0))
+
+    code = clean_code(stock_code)
+
+    if (
+        supply_df is not None
+        and not supply_df.empty
+        and "종목코드" in supply_df.columns
+    ):
+        stock_supply = supply_df.copy()
+        stock_supply["종목코드"] = (
+            stock_supply["종목코드"]
+            .astype(str)
+            .str.replace(".0", "", regex=False)
+            .str.zfill(6)
+        )
+        stock_supply = stock_supply[
+            stock_supply["종목코드"] == code
+        ].copy()
+
+        if not stock_supply.empty:
+            if "날짜" in stock_supply.columns:
+                stock_supply["날짜"] = pd.to_datetime(
+                    stock_supply["날짜"],
+                    errors="coerce",
+                )
+                stock_supply = stock_supply.sort_values("날짜")
+
+            latest = stock_supply.iloc[-1]
+
+            foreign = safe_float(
+                latest.get("외국인순매수량", foreign)
+            )
+            institution = safe_float(
+                latest.get("기관순매수량", institution)
+            )
+            personal = safe_float(
+                latest.get("개인순매수량", personal)
+            )
+
+    all_missing = (
+        foreign == 0
+        and institution == 0
+        and personal == 0
+    )
+
+    return foreign, institution, personal, all_missing
+
+
+def make_trading_trend_text(
+    row: pd.Series,
+    supply_df: pd.DataFrame,
+    stock_code: str,
+) -> str:
+    foreign, institution, personal, all_missing = (
+        _latest_trading_values(
+            row=row,
+            supply_df=supply_df,
+            stock_code=stock_code,
+        )
+    )
+
+    if all_missing:
+        return "매매동향 없음"
+
+    return (
+        f"외{_trend_arrow(foreign)} "
+        f"기{_trend_arrow(institution)} "
+        f"개{_trend_arrow(personal)}"
+    )
+
+
 # -----------------------------
 # 오늘 추천 TOP30
 # -----------------------------
-def show_today_top(score_df: pd.DataFrame, chart_df: pd.DataFrame, selected_date):
-    today_df = score_df[score_df["저장일자"] == selected_date].copy()
-    today_df = today_df.sort_values(["최종점수", "시장점수"], ascending=False)
+
+
+
+def show_today_top(
+    score_df: pd.DataFrame,
+    chart_df: pd.DataFrame,
+    supply_df: pd.DataFrame,
+    news_df: pd.DataFrame,
+    classification_df: pd.DataFrame,
+    theme_history_df: pd.DataFrame,
+    selected_date,
+):
+    today_df = score_df[
+        score_df["저장일자"] == selected_date
+    ].copy()
+
+    today_df = today_df.sort_values(
+        ["최종점수", "시장점수"],
+        ascending=False,
+    )
 
     st.subheader(f"{selected_date} 추천점수 TOP30")
 
-    popup = make_stock_dialog(score_df, chart_df)
+    detail_popup = make_stock_dialog(
+        score_df=score_df,
+        chart_df=chart_df,
+        supply_df=supply_df,
+        news_df=news_df,
+        classification_df=classification_df,
+        theme_history_df=theme_history_df,
+    )
 
-    widths = [0.7, 1.1, 2.8, 0.9, 0.9, 0.9, 1.1, 4.2, 0.8]
+    trading_popup, news_popup = make_quick_analysis_dialogs(
+        score_df=score_df,
+        supply_df=supply_df,
+        news_df=news_df,
+    )
+
+    # 추천 사유와 상세 버튼을 제거하고 종목명 영역을 넓힘
+    widths = [
+        0.55,  # 순위
+        1.0,   # 종목코드
+        4.8,   # 종목명
+        0.85,  # 시장
+        1.65,  # 매매동향
+        1.0,   # 뉴스
+        0.85,  # 최종
+        1.0,   # 추천
+    ]
+
+    headers = [
+        "순위",
+        "종목코드",
+        "종목명",
+        "시장",
+        "매매동향",
+        "뉴스",
+        "최종",
+        "추천",
+    ]
+
     header_cols = st.columns(widths)
-    headers = ["순위", "종목코드", "종목명", "시장", "뉴스", "최종", "추천", "점수변동/추천사유", "상세"]
-    for col, text in zip(header_cols, headers):
-        col.markdown(f"**{text}**")
+    for col, label in zip(header_cols, headers):
+        col.markdown(f"**{label}**")
 
     for _, row in today_df.head(30).iterrows():
         code = clean_code(row.get("종목코드", ""))
-        name = row.get("종목명", "")
+        name = str(row.get("종목명", "")).strip()
         cols = st.columns(widths)
-        cols[0].markdown(f"<div class='normal-text'>{row.get('점수순위', '')}</div>", unsafe_allow_html=True)
-        cols[1].markdown(f"<div class='normal-text'>{code}</div>", unsafe_allow_html=True)
-        cols[2].markdown(f"<div class='stock-name-text'>{name}</div>", unsafe_allow_html=True)
-        cols[3].markdown(f"<div class='normal-text'>{row.get('시장점수', '')}</div>", unsafe_allow_html=True)
-        cols[4].markdown(f"<div class='normal-text'>{safe_float(row.get('뉴스점수', 0)):+g}</div>", unsafe_allow_html=True)
-        cols[5].markdown(f"<div class='normal-text'>{row.get('최종점수', row.get('총점', ''))}</div>", unsafe_allow_html=True)
-        cols[6].markdown(f"<div class='normal-text'>{row.get('최종추천', '')}</div>", unsafe_allow_html=True)
 
-        change_text = make_score_change_text(score_df, row)
-        recommendation_reason = str(row.get("AI추천사유", "")).strip()
-        display_reason = change_text
-        if recommendation_reason:
-            display_reason += f"<br><span style='color:#6B7280'>추천: {recommendation_reason}</span>"
-        cols[7].markdown(f"<div class='reason-text'>{display_reason}</div>", unsafe_allow_html=True)
+        cols[0].markdown(
+            f"<div class='normal-text'>{row.get('점수순위', '')}</div>",
+            unsafe_allow_html=True,
+        )
 
-        if cols[8].button("상세", key=f"top_detail_{selected_date}_{code}"):
-            popup(name, code)
+        cols[1].markdown(
+            f"<div class='normal-text'>{code}</div>",
+            unsafe_allow_html=True,
+        )
 
+        # 종목명 자체를 클릭하면 전체 상세 팝업
+        if cols[2].button(
+            name,
+            key=f"stock_link_{selected_date}_{code}",
+        ):
+            detail_popup(name, code)
 
-# -----------------------------
-# 종목 검색
-# -----------------------------
-def show_stock_search(score_df: pd.DataFrame, chart_df: pd.DataFrame, master_df: pd.DataFrame):
+        market_score = safe_float(row.get("시장점수", 0))
+        cols[3].markdown(
+            f"<div class='normal-text'>{market_score:.2f}</div>",
+            unsafe_allow_html=True,
+        )
+
+        trading_label = make_trading_trend_text(
+            row=row,
+            supply_df=supply_df,
+            stock_code=code,
+        )
+
+        if cols[4].button(
+            trading_label,
+            key=f"trading_link_{selected_date}_{code}",
+        ):
+            trading_popup(name, code)
+
+        news_label = make_news_status_text(row)
+
+        if news_label == "호재":
+            news_key_prefix = "news_good"
+        elif news_label == "악재":
+            news_key_prefix = "news_bad"
+        elif news_label == "중립":
+            news_key_prefix = "news_neutral"
+        elif news_label == "뉴스 없음":
+            news_key_prefix = "news_none"
+        else:
+            news_key_prefix = "news_unanalyzed"
+
+        if cols[5].button(
+            news_label,
+            key=f"{news_key_prefix}_{selected_date}_{code}",
+        ):
+            news_popup(name, code)
+
+        final_score = safe_float(
+            row.get("최종점수", row.get("총점", 0))
+        )
+        cols[6].markdown(
+            f"<div class='normal-text'>{final_score:.2f}</div>",
+            unsafe_allow_html=True,
+        )
+
+        recommendation = str(
+            row.get("최종추천", "")
+        ).strip()
+
+        recommendation_colors = {
+            "강력관심": "#15803D",
+            "관심": "#16A34A",
+            "관찰": "#CA8A04",
+            "약세": "#EA580C",
+            "제외": "#DC2626",
+        }
+        recommendation_color = recommendation_colors.get(
+            recommendation,
+            "#374151",
+        )
+
+        cols[7].markdown(
+            (
+                "<div class='normal-text' "
+                f"style='color:{recommendation_color};"
+                "font-weight:600;'>"
+                f"{recommendation}"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+
+def show_stock_search(
+    score_df: pd.DataFrame,
+    chart_df: pd.DataFrame,
+    supply_df: pd.DataFrame,
+    news_df: pd.DataFrame,
+    master_df: pd.DataFrame,
+    classification_df: pd.DataFrame,
+    theme_history_df: pd.DataFrame,
+):
     st.subheader("종목 검색")
 
     if master_df.empty:
@@ -562,8 +2001,592 @@ def show_stock_search(score_df: pd.DataFrame, chart_df: pd.DataFrame, master_df:
     selected_code = selected.split("(")[1].split(")")[0]
     selected_name = selected.split(" (")[0]
 
-    show_stock_detail_by_code(score_df, chart_df, selected_name, selected_code)
+    show_stock_detail_by_code(
+        score_df=score_df,
+        chart_df=chart_df,
+        supply_df=supply_df,
+        news_df=news_df,
+        classification_df=classification_df,
+        theme_history_df=theme_history_df,
+        stock_name=selected_name,
+        stock_code=selected_code,
+    )
 
+
+
+
+# -----------------------------
+# 시장 현황
+# -----------------------------
+@st.cache_data(ttl=20, show_spinner=False)
+def load_market_overview_cached():
+    token = get_access_token()
+    if not token:
+        return {
+            "error": "KIS 접근토큰 발급에 실패했습니다."
+        }
+
+    try:
+        return get_market_overview(token)
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def _market_number(value, decimals=2):
+    number = safe_float(value, 0)
+    return f"{number:,.{decimals}f}"
+
+
+def _market_delta_text(item):
+    change = safe_float(item.get("change", 0))
+    rate = safe_float(item.get("change_rate", 0))
+    return f"{change:+,.2f} ({rate:+.2f}%)"
+
+
+def calculate_market_temperature(overview):
+    """
+    0~100의 단순 시장온도.
+    KOSPI·KOSDAQ 등락률과 환율 방향을 이용한 1차 버전이다.
+    """
+    if not isinstance(overview, dict):
+        return 50, "판단불가"
+
+    kospi_rate = safe_float(
+        overview.get("KOSPI", {}).get("change_rate", 0)
+    )
+    kosdaq_rate = safe_float(
+        overview.get("KOSDAQ", {}).get("change_rate", 0)
+    )
+    fx_rate = safe_float(
+        overview.get("USD/KRW", {}).get("change_rate", 0)
+    )
+
+    score = 50
+    score += max(-20, min(20, kospi_rate * 8))
+    score += max(-20, min(20, kosdaq_rate * 8))
+    # 원·달러 상승은 국내주식에 대체로 부담으로 반영
+    score -= max(-10, min(10, fx_rate * 5))
+    score = int(max(0, min(100, round(score))))
+
+    if score >= 75:
+        label = "강세"
+    elif score >= 60:
+        label = "다소 강세"
+    elif score >= 40:
+        label = "중립"
+    elif score >= 25:
+        label = "다소 약세"
+    else:
+        label = "약세"
+
+    return score, label
+
+
+def show_market_overview():
+    st.header("시장 현황")
+
+    overview = load_market_overview_cached()
+
+    if "error" in overview:
+        st.error(overview["error"])
+        return
+
+    kospi = overview.get("KOSPI", {})
+    kosdaq = overview.get("KOSDAQ", {})
+    usdkrw = overview.get("USD/KRW", {})
+
+    temperature, temperature_label = (
+        calculate_market_temperature(overview)
+    )
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric(
+        "코스피",
+        _market_number(kospi.get("current")),
+        _market_delta_text(kospi),
+    )
+    col1.caption(
+        f"전일 { _market_number(kospi.get('previous')) }"
+    )
+
+    col2.metric(
+        "코스닥",
+        _market_number(kosdaq.get("current")),
+        _market_delta_text(kosdaq),
+    )
+    col2.caption(
+        f"전일 { _market_number(kosdaq.get('previous')) }"
+    )
+
+    col3.metric(
+        "원·달러 환율",
+        f"{_market_number(usdkrw.get('current'))}원",
+        _market_delta_text(usdkrw),
+    )
+    col3.caption(
+        f"전일 {_market_number(usdkrw.get('previous'))}원"
+    )
+
+    col4.metric(
+        "시장온도",
+        f"{temperature}점",
+        temperature_label,
+    )
+
+    errors = []
+    for name, item in overview.items():
+        if item.get("error"):
+            errors.append(f"{name}: {item['error']}")
+
+    updated_times = [
+        item.get("updated_at")
+        for item in overview.values()
+        if isinstance(item, dict) and item.get("updated_at")
+    ]
+
+    if updated_times:
+        st.caption(
+            "시장 기준시각: "
+            f"{max(updated_times)} · "
+            "코스피·코스닥 KIS 조회, 환율은 제공처에 따라 지연될 수 있음"
+        )
+
+    if errors:
+        for error in errors:
+            st.warning(error)
+
+    if st.button("시장 현황 새로고침"):
+        load_market_overview_cached.clear()
+        st.rerun()
+
+
+
+def _show_strength_chart(
+    df: pd.DataFrame,
+    name_column: str,
+    strength_column: str,
+    title: str,
+):
+    if df.empty:
+        st.info(f"{title} 데이터가 아직 없습니다.")
+        return
+
+    top = df.head(15).copy()
+
+    fig = px.bar(
+        top.sort_values(strength_column),
+        x=strength_column,
+        y=name_column,
+        orientation="h",
+        hover_data=[
+            column
+            for column in [
+                "후보종목수",
+                "평균최종점수",
+                "최고최종점수",
+                "평균시장점수",
+                "평균수급점수",
+                "평균뉴스점수",
+                "강한종목비율(%)",
+                "대표종목",
+                "대표종목점수",
+            ]
+            if column in top.columns
+        ],
+        title=title,
+    )
+    fig.update_layout(
+        xaxis_title="강도",
+        yaxis_title="",
+    )
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+    )
+
+    st.dataframe(
+        df.head(30),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def show_sector_strength(
+    current_df: pd.DataFrame,
+    classification_df: pd.DataFrame,
+):
+    st.header("업종·테마 강도")
+
+    industry_df = make_industry_strength(
+        current_df=current_df,
+        classification_df=classification_df,
+    )
+    theme_df = make_theme_strength(
+        current_df=current_df,
+        classification_df=classification_df,
+    )
+
+    if industry_df.empty and theme_df.empty:
+        st.warning(
+            "업종·테마 분류 데이터가 없습니다. "
+            "`python main.py --once`를 한 번 실행하면 "
+            "현재 후보 종목을 Gemini가 분류하고 DB에 저장합니다."
+        )
+        return
+
+    tab1, tab2 = st.tabs(
+        [
+            "강한 테마",
+            "강한 업종",
+        ]
+    )
+
+    with tab1:
+        _show_strength_chart(
+            theme_df,
+            "테마",
+            "테마강도",
+            "현재 강한 투자 테마 TOP15",
+        )
+
+    with tab2:
+        _show_strength_chart(
+            industry_df,
+            "업종",
+            "업종강도",
+            "현재 강한 업종 TOP15",
+        )
+
+def show_market_home(
+    current_df: pd.DataFrame,
+    history_df: pd.DataFrame,
+    chart_df: pd.DataFrame,
+    master_df: pd.DataFrame,
+):
+    show_market_overview()
+
+    st.divider()
+
+    combined_df = pd.concat(
+        [history_df, current_df],
+        ignore_index=True,
+        sort=False,
+    )
+    combined_df = normalize_score_df(combined_df)
+
+    show_ai_analysis(
+        score_df=combined_df,
+        chart_df=chart_df,
+        master_df=master_df,
+    )
+
+
+def show_intraday_flow(snapshot_df: pd.DataFrame):
+    st.header("장중 흐름")
+
+    tab1, tab2, tab3 = st.tabs(
+        [
+            "최근 30분 점수 변화",
+            "오늘 TOP30 유지율",
+            "진입·이탈 이벤트",
+        ]
+    )
+
+    with tab1:
+        show_intraday_risers(snapshot_df)
+
+    with tab2:
+        show_intraday_repeat(snapshot_df)
+
+    with tab3:
+        event_df = load_table("market_event_history")
+
+        if event_df.empty:
+            st.info("오늘 저장된 진입·이탈 이벤트가 없습니다.")
+        else:
+            if "이벤트일시" in event_df.columns:
+                event_df["이벤트일시"] = pd.to_datetime(
+                    event_df["이벤트일시"],
+                    errors="coerce",
+                )
+                today = pd.Timestamp.now().date()
+                event_df = event_df[
+                    event_df["이벤트일시"].dt.date == today
+                ]
+
+            if event_df.empty:
+                st.info("오늘 저장된 진입·이탈 이벤트가 없습니다.")
+            else:
+                event_df = event_df.sort_values(
+                    "이벤트일시",
+                    ascending=False,
+                )
+                st.dataframe(
+                    event_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+
+def show_past_analysis(history_df: pd.DataFrame):
+    st.header("과거 분석")
+
+    if history_df.empty:
+        st.info("장 마감 일별 데이터가 아직 없습니다.")
+        return
+
+    tab1, tab2 = st.tabs(
+        [
+            "날짜별 추천",
+            "일별 반복 추천",
+        ]
+    )
+
+    with tab1:
+        dates = sorted(
+            history_df["저장일자"].dropna().unique(),
+            reverse=True,
+        )
+        selected_date = st.selectbox(
+            "과거 조회 날짜",
+            dates,
+            key="past_analysis_date",
+        )
+        daily = history_df[
+            history_df["저장일자"] == selected_date
+        ].copy()
+
+        columns = [
+            column
+            for column in [
+                "점수순위",
+                "종목코드",
+                "종목명",
+                "시장점수",
+                "수급점수",
+                "뉴스점수",
+                "최종점수",
+                "최종추천",
+            ]
+            if column in daily.columns
+        ]
+
+        st.dataframe(
+            daily[columns].sort_values(
+                "최종점수",
+                ascending=False,
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with tab2:
+        show_repeat_stocks(history_df)
+
+
+# -----------------------------
+# 장중 30분 분석
+# -----------------------------
+def show_current_status_banner(current_df: pd.DataFrame):
+    if current_df.empty:
+        st.error(
+            "현재 추천 데이터가 없습니다. "
+            "`python main.py`를 실행하세요."
+        )
+        return
+
+    updated = pd.NaT
+
+    # 현재 실제 score 테이블의 최신 저장시간을 우선 사용
+    if (
+        "저장일자" in current_df.columns
+        and "저장시간" in current_df.columns
+    ):
+        date_text = current_df["저장일자"].fillna("").astype(str)
+        time_text = current_df["저장시간"].fillna("").astype(str)
+
+        updated = pd.to_datetime(
+            date_text + " " + time_text,
+            errors="coerce",
+        ).max()
+
+    # 저장일자/저장시간이 없을 때만 보조 컬럼 사용
+    if pd.isna(updated) and "갱신일시" in current_df.columns:
+        updated = pd.to_datetime(
+            current_df["갱신일시"],
+            errors="coerce",
+        ).max()
+
+    if (
+        pd.isna(updated)
+        and "최종갱신일자" in current_df.columns
+        and "최종갱신시간" in current_df.columns
+    ):
+        date_text = (
+            current_df["최종갱신일자"]
+            .fillna("")
+            .astype(str)
+        )
+        time_text = (
+            current_df["최종갱신시간"]
+            .fillna("")
+            .astype(str)
+        )
+
+        updated = pd.to_datetime(
+            date_text + " " + time_text,
+            errors="coerce",
+        ).max()
+
+    if pd.isna(updated):
+        st.warning("현재 데이터의 갱신시각을 확인할 수 없습니다.")
+        return
+
+    age_minutes = (
+        pd.Timestamp.now() - updated
+    ).total_seconds() / 60
+
+    if age_minutes > 45:
+        st.error(
+            f"현재 추천 데이터가 {age_minutes:.0f}분 동안 "
+            "갱신되지 않았습니다. "
+            "현재 투자 판단에 사용하지 마세요."
+        )
+    elif age_minutes > 20:
+        st.warning(
+            f"마지막 갱신: {updated:%Y-%m-%d %H:%M:%S} "
+            f"({age_minutes:.0f}분 전)"
+        )
+    else:
+        st.success(
+            f"장중 최신 데이터 · 마지막 갱신 "
+            f"{updated:%Y-%m-%d %H:%M:%S}"
+        )
+
+def show_intraday_risers(snapshot_df: pd.DataFrame):
+    st.subheader("장중 점수 상승 종목")
+
+    if snapshot_df.empty:
+        st.info("장중 스냅샷이 아직 없습니다.")
+        return
+
+    df = snapshot_df.copy()
+    df["스냅샷일시"] = pd.to_datetime(
+        df["스냅샷일시"],
+        errors="coerce",
+    )
+    today = pd.Timestamp.now().date()
+    df = df[df["스냅샷일시"].dt.date == today]
+
+    times = sorted(df["스냅샷일시"].dropna().unique())
+    if len(times) < 2:
+        st.info("비교하려면 오늘 스냅샷이 최소 2회 필요합니다.")
+        return
+
+    previous_time, current_time = times[-2], times[-1]
+    previous = df[df["스냅샷일시"] == previous_time][
+        ["종목코드", "종목명", "최종점수", "현재순위"]
+    ].copy()
+    current = df[df["스냅샷일시"] == current_time][
+        ["종목코드", "종목명", "최종점수", "현재순위"]
+    ].copy()
+
+    compare = pd.merge(
+        current,
+        previous,
+        on="종목코드",
+        how="outer",
+        suffixes=("_현재", "_이전"),
+    )
+
+    compare["종목명"] = compare["종목명_현재"].fillna(
+        compare["종목명_이전"]
+    )
+    compare["점수변화"] = (
+        pd.to_numeric(compare["최종점수_현재"], errors="coerce").fillna(0)
+        - pd.to_numeric(compare["최종점수_이전"], errors="coerce").fillna(0)
+    )
+    compare["순위변화"] = (
+        pd.to_numeric(compare["현재순위_이전"], errors="coerce")
+        - pd.to_numeric(compare["현재순위_현재"], errors="coerce")
+    )
+
+    compare = compare.sort_values("점수변화", ascending=False)
+
+    st.caption(
+        f"{pd.Timestamp(previous_time):%H:%M} → "
+        f"{pd.Timestamp(current_time):%H:%M} 비교"
+    )
+    st.dataframe(
+        compare[
+            [
+                "종목코드",
+                "종목명",
+                "최종점수_이전",
+                "최종점수_현재",
+                "점수변화",
+                "현재순위_이전",
+                "현재순위_현재",
+                "순위변화",
+            ]
+        ].head(50),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def show_intraday_repeat(snapshot_df: pd.DataFrame):
+    st.subheader("오늘 장중 TOP30 유지 종목")
+
+    if snapshot_df.empty:
+        st.info("장중 스냅샷이 아직 없습니다.")
+        return
+
+    df = snapshot_df.copy()
+    df["스냅샷일시"] = pd.to_datetime(
+        df["스냅샷일시"],
+        errors="coerce",
+    )
+    today = pd.Timestamp.now().date()
+    df = df[df["스냅샷일시"].dt.date == today]
+
+    if df.empty:
+        st.info("오늘 저장된 장중 스냅샷이 없습니다.")
+        return
+
+    total_snapshots = df["스냅샷일시"].nunique()
+    top30 = df[
+        pd.to_numeric(df["현재순위"], errors="coerce") <= 30
+    ]
+
+    result = (
+        top30.groupby(["종목코드", "종목명"])
+        .agg(
+            TOP30유지횟수=("스냅샷일시", "nunique"),
+            평균점수=("최종점수", "mean"),
+            최고점수=("최종점수", "max"),
+            최저점수=("최종점수", "min"),
+            최근순위=("현재순위", "last"),
+        )
+        .reset_index()
+    )
+
+    result["유지율(%)"] = (
+        result["TOP30유지횟수"] / total_snapshots * 100
+    ).round(1)
+
+    result = result.sort_values(
+        ["TOP30유지횟수", "평균점수"],
+        ascending=False,
+    )
+
+    st.caption(f"오늘 저장된 스냅샷: {total_snapshots}회")
+    st.dataframe(
+        result,
+        use_container_width=True,
+        hide_index=True,
+    )
 
 # -----------------------------
 # 점수 비교 / 반복 추천
@@ -790,26 +2813,16 @@ def show_ai_analysis(score_df: pd.DataFrame, chart_df: pd.DataFrame, master_df: 
             }
         ]
 
-    top_col1, top_col2 = st.columns([3, 1])
-    with top_col1:
-        model_name = st.text_input(
-            "Gemini 모델",
-            value=st.session_state.get("gemini_model", DEFAULT_MODEL),
-            help="사용 가능한 모델이 다르면 .env의 GEMINI_MODEL 또는 이 입력값을 변경하세요.",
-        )
-        st.session_state.gemini_model = model_name.strip() or DEFAULT_MODEL
+    st.session_state.gemini_model = DEFAULT_MODEL
 
-    with top_col2:
-        st.write("")
-        st.write("")
-        if st.button("대화 초기화", use_container_width=True):
-            st.session_state.gemini_messages = [
-                {
-                    "role": "assistant",
-                    "content": "대화를 초기화했습니다. 새 질문을 입력해 주세요.",
-                }
-            ]
-            st.rerun()
+    if st.button("대화 초기화", use_container_width=True):
+        st.session_state.gemini_messages = [
+            {
+                "role": "assistant",
+                "content": "대화를 초기화했습니다. 새 질문을 입력해 주세요.",
+            }
+        ]
+        st.rerun()
 
     for message in st.session_state.gemini_messages:
         with st.chat_message(message["role"]):
@@ -851,32 +2864,132 @@ def show_ai_analysis(score_df: pd.DataFrame, chart_df: pd.DataFrame, master_df: 
 def main():
     st.title("주식 추천 대시보드")
 
-    score_df = normalize_score_df(load_table("score_history"))
+    all_score_df = normalize_score_df(
+        load_table("score")
+    )
+
+    history_df = all_score_df.copy()
+
+    if all_score_df.empty:
+        current_df = pd.DataFrame()
+    else:
+        update_datetime = pd.to_datetime(
+            all_score_df["저장일자"].astype(str)
+            + " "
+            + all_score_df["저장시간"].astype(str),
+            errors="coerce",
+        )
+
+        latest_update = update_datetime.max()
+
+        current_df = all_score_df[
+            update_datetime == latest_update
+            ].copy()
+
+    # 현재 database.py에서는 intraday_snapshot을 따로 저장하지 않음
+    snapshot_df = pd.DataFrame()
+
     chart_df = load_table("chart_history")
-    master_df = normalize_master_df(load_table("stock_master"))
 
-    if score_df.empty:
-        st.warning("score_history 데이터가 없습니다. 먼저 main.py를 실행하세요.")
-        return
+    supply_df = normalize_supply_df(
+        load_table("supply_demand")
+    )
 
-    dates = sorted(score_df["저장일자"].dropna().unique(), reverse=True)
-    selected_date = st.sidebar.selectbox("조회 날짜", dates)
+    news_df = normalize_news_df(
+        load_table("news_history")
+    )
+    master_df = normalize_master_df(
+        load_table("stock_master")
+    )
+
+    classification_df = normalize_classification_df(
+        load_table("stock_classification")
+    )
+
+    theme_history_df = normalize_theme_history_df(
+        load_table("stock_theme_history")
+    )
 
     menu = st.sidebar.radio(
         "메뉴",
-        ["오늘 추천 TOP30", "종목 검색", "점수 상승 종목", "반복 추천 종목", "Gemini AI"],
+        [
+            "시장 현황",
+            "현재 추천 TOP30",
+            "종목 검색",
+            "업종·테마 강도",
+            "장중 흐름",
+            "과거 분석",
+            "DB 상태",
+        ],
     )
 
-    if menu == "오늘 추천 TOP30":
-        show_today_top(score_df, chart_df, selected_date)
-    elif menu == "종목 검색":
-        show_stock_search(score_df, chart_df, master_df)
-    elif menu == "점수 상승 종목":
-        show_score_compare(score_df)
-    elif menu == "반복 추천 종목":
-        show_repeat_stocks(score_df)
-    elif menu == "Gemini AI":
-        show_ai_analysis(score_df, chart_df, master_df)
+    if menu == "시장 현황":
+        show_market_home(
+            current_df=current_df,
+            history_df=history_df,
+            chart_df=chart_df,
+            master_df=master_df,
+        )
+        return
+
+    if menu == "업종·테마 강도":
+        show_sector_strength(
+            current_df=current_df,
+            classification_df=classification_df,
+        )
+        return
+
+    if menu == "DB 상태":
+        show_db_status()
+        return
+
+    if menu == "현재 추천 TOP30":
+        show_current_status_banner(current_df)
+
+        if current_df.empty:
+            return
+
+        display_df = current_df.copy()
+        display_df["저장일자"] = pd.Timestamp.now().date()
+
+        show_today_top(
+            score_df=display_df,
+            chart_df=chart_df,
+            supply_df=supply_df,
+            news_df=news_df,
+            classification_df=classification_df,
+            theme_history_df=theme_history_df,
+            selected_date=pd.Timestamp.now().date(),
+        )
+        return
+
+    if menu == "장중 흐름":
+        show_intraday_flow(snapshot_df)
+        return
+
+    if menu == "종목 검색":
+        combined_df = pd.concat(
+            [history_df, current_df],
+            ignore_index=True,
+            sort=False,
+        )
+        combined_df = normalize_score_df(combined_df)
+
+        show_stock_search(
+            score_df=combined_df,
+            chart_df=chart_df,
+            supply_df=supply_df,
+            news_df=news_df,
+            master_df=master_df,
+            classification_df=classification_df,
+            theme_history_df=theme_history_df,
+        )
+        return
+
+    if menu == "과거 분석":
+        show_past_analysis(history_df)
+        return
+
 
 
 if __name__ == "__main__":
