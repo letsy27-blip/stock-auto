@@ -1,0 +1,61 @@
+name: Korean market collector
+
+on:
+  workflow_dispatch:
+  schedule:
+    # UTC 기준 00:07/37~06:07/37 = 한국 시간 평일 09:07/37~15:07/37
+    # 정각을 피해 GitHub Actions 예약 지연 가능성을 줄인다.
+    - cron: "7,37 0-6 * * 1-5"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: korean-market-collector
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+      KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+      KIS_BASE_URL: ${{ secrets.KIS_BASE_URL }}
+      KIS_ACCOUNT_NO: ${{ secrets.KIS_ACCOUNT_NO }}
+      KIS_ACCOUNT_CODE: ${{ secrets.KIS_ACCOUNT_CODE }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODEL: gemini-2.5-flash
+      # 무료 한도를 보호한다. 핵심 후보만 Gemini로 정밀 평가하고 나머지는 로컬 1차 분석을 쓴다.
+      GEMINI_MAX_CALLS_PER_RUN: "8"
+      GEMINI_PRIORITY_STOCKS_PER_RUN: "8"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Collect market data once
+        run: python main.py --once
+
+      - name: Commit updated data
+        run: |
+          if git diff --quiet -- stock_data.db; then
+            echo "No database changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add stock_data.db
+          git commit -m "chore: update market data"
+          git push

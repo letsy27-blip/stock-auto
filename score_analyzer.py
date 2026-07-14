@@ -10,7 +10,10 @@ import pandas as pd
 # 거래량 15 + 상승률 15 + 거래대금 15
 # + 20일 10 + 60일 10 + 거래량증가 10
 # + 정배열 5 + 신고가 5 + RSI 5 + MACD 5 = 95점
-MARKET_SCORE_MAX = 95.0
+MARKET_SCORE_RAW_MAX = 95.0
+MARKET_SCORE_MAX = 70.0
+SUPPLY_SCORE_MIN = -15.0
+SUPPLY_SCORE_MAX = 15.0
 NEWS_SCORE_MIN = -10.0
 NEWS_SCORE_MAX = 10.0
 FINAL_SCORE_MIN = 0.0
@@ -272,6 +275,236 @@ def _calc_technical_metrics(
     }
 
 
+
+
+def _calc_supply_metrics(
+    supply_demand_df: pd.DataFrame | None,
+    stock_code: str,
+) -> dict[str, Any]:
+    default = {
+        "수급기준일": "",
+        "외국인순매수량": 0,
+        "기관순매수량": 0,
+        "개인순매수량": 0,
+        "외국인3일합계": 0,
+        "기관3일합계": 0,
+        "외국인연속순매수일": 0,
+        "기관연속순매수일": 0,
+        "수급점수": 0.0,
+        "수급판단": "데이터 없음",
+        "수급사유": "데이터 없음",
+    }
+
+    if supply_demand_df is None or supply_demand_df.empty:
+        return default
+
+    required = {
+        "종목코드",
+        "날짜",
+        "외국인순매수량",
+        "기관순매수량",
+        "개인순매수량",
+    }
+    if not required.issubset(supply_demand_df.columns):
+        return default
+
+    code = _clean_code(stock_code)
+    df = supply_demand_df.copy()
+    df["종목코드"] = df["종목코드"].map(_clean_code)
+    df = df[df["종목코드"] == code].copy()
+
+    if df.empty:
+        return default
+
+    df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
+
+    for column in [
+        "외국인순매수량",
+        "기관순매수량",
+        "개인순매수량",
+    ]:
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce",
+        ).fillna(0)
+
+    df = (
+        df.dropna(subset=["날짜"])
+        .sort_values("날짜")
+        .drop_duplicates(subset=["날짜"], keep="last")
+    )
+
+    if df.empty:
+        return default
+
+    latest = df.iloc[-1]
+
+    foreign_today = int(latest["외국인순매수량"])
+    institution_today = int(latest["기관순매수량"])
+    personal_today = int(latest["개인순매수량"])
+
+    all_missing = (
+        foreign_today == 0
+        and institution_today == 0
+        and personal_today == 0
+    )
+
+    if all_missing:
+        return {
+            **default,
+            "수급기준일": latest["날짜"].strftime("%Y-%m-%d"),
+        }
+
+    recent3 = df.tail(3)
+    foreign_3d = int(recent3["외국인순매수량"].sum())
+    institution_3d = int(recent3["기관순매수량"].sum())
+
+    def consecutive_positive(series: pd.Series) -> int:
+        count = 0
+        for value in reversed(series.tolist()):
+            if value > 0:
+                count += 1
+            else:
+                break
+        return count
+
+    foreign_days = consecutive_positive(
+        df["외국인순매수량"]
+    )
+    institution_days = consecutive_positive(
+        df["기관순매수량"]
+    )
+
+    score = 0.0
+    reasons: list[str] = []
+
+    if foreign_today > 0:
+        score += 3
+        reasons.append("외국인 순매수")
+    elif foreign_today < 0:
+        score -= 3
+        reasons.append("외국인 순매도")
+
+    if institution_today > 0:
+        score += 3
+        reasons.append("기관 순매수")
+    elif institution_today < 0:
+        score -= 3
+        reasons.append("기관 순매도")
+
+    if foreign_today > 0 and institution_today > 0:
+        score += 4
+        reasons.append("외국인·기관 동반 순매수")
+    elif foreign_today < 0 and institution_today < 0:
+        score -= 4
+        reasons.append("외국인·기관 동반 순매도")
+
+    if foreign_3d > 0:
+        score += 1
+    elif foreign_3d < 0:
+        score -= 1
+
+    if institution_3d > 0:
+        score += 1
+    elif institution_3d < 0:
+        score -= 1
+
+    if foreign_days >= 3:
+        score += 1.5
+        reasons.append(f"외국인 {foreign_days}일 연속 순매수")
+
+    if institution_days >= 3:
+        score += 1.5
+        reasons.append(f"기관 {institution_days}일 연속 순매수")
+
+    if (
+        personal_today > 0
+        and foreign_today < 0
+        and institution_today < 0
+    ):
+        score -= 2
+        reasons.append("개인 매수 집중·외국인기관 이탈")
+
+    score = round(
+        _clip(score, SUPPLY_SCORE_MIN, SUPPLY_SCORE_MAX),
+        2,
+    )
+
+    if score >= 7:
+        judgement = "매우 강한 순매수"
+    elif score >= 3:
+        judgement = "순매수 우위"
+    elif score <= -7:
+        judgement = "매우 강한 순매도"
+    elif score <= -3:
+        judgement = "순매도 우위"
+    else:
+        judgement = "중립"
+
+    return {
+        "수급기준일": latest["날짜"].strftime("%Y-%m-%d"),
+        "외국인순매수량": foreign_today,
+        "기관순매수량": institution_today,
+        "개인순매수량": personal_today,
+        "외국인3일합계": foreign_3d,
+        "기관3일합계": institution_3d,
+        "외국인연속순매수일": foreign_days,
+        "기관연속순매수일": institution_days,
+        "수급점수": score,
+        "수급판단": judgement,
+        "수급사유": (
+            ", ".join(reasons)
+            if reasons
+            else "뚜렷한 매수 우위 없음"
+        ),
+    }
+
+def _news_lookup(
+    news_summary_df: pd.DataFrame | None,
+    stock_code: str,
+) -> dict[str, Any]:
+    default = {
+        "뉴스점수": 0.0,
+        "뉴스요약": "관련 뉴스 없음",
+        "뉴스분석사유": "",
+        "뉴스건수": 0,
+        "뉴스평가상태": "뉴스 없음",
+        "뉴스신뢰도": 0,
+    }
+    if news_summary_df is None or news_summary_df.empty:
+        return default
+    if "종목코드" not in news_summary_df.columns:
+        return default
+
+    df = news_summary_df.copy()
+    df["종목코드"] = df["종목코드"].map(_clean_code)
+    hit = df[df["종목코드"] == _clean_code(stock_code)]
+    if hit.empty:
+        return default
+
+    row = hit.iloc[-1]
+    return {
+        "뉴스점수": round(
+            _clip(
+                _safe_float(row.get("뉴스점수")),
+                NEWS_SCORE_MIN,
+                NEWS_SCORE_MAX,
+            ),
+            2,
+        ),
+        "뉴스요약": str(
+            row.get("뉴스요약", "관련 뉴스 없음")
+        ),
+        "뉴스분석사유": str(
+            row.get("뉴스분석사유", "")
+        ),
+        "뉴스건수": int(
+            _safe_float(row.get("뉴스건수"), 0)
+        ),
+        "뉴스평가상태": str(row.get("뉴스평가상태", "분석 상태 미확인")),
+        "뉴스신뢰도": int(_safe_float(row.get("신뢰도"), 0)),
+    }
+
 def _extract_news_score(row: pd.Series) -> float:
     """
     ranking/news 단계에서 '뉴스점수'가 전달되면 -10~+10 범위로 사용한다.
@@ -316,11 +549,49 @@ def _make_reason(row: dict[str, Any]) -> str:
     return ", ".join(reasons)
 
 
+
+def _make_exclusion_reasons(row: dict[str, Any]) -> str:
+    reasons: list[str] = []
+
+    final_score = _safe_float(row.get("최종점수"))
+    market_score = _safe_float(row.get("시장점수"))
+    supply_score = _safe_float(row.get("수급점수"))
+    news_score = _safe_float(row.get("뉴스점수"))
+    rsi = _safe_float(row.get("RSI"), 50.0)
+
+    if final_score < 40:
+        reasons.append(f"최종점수 {final_score:g}점으로 추천 기준 40점 미달")
+    if market_score < 35:
+        reasons.append(f"시장점수 {market_score:g}점으로 시장 강도 부족")
+    if supply_score <= -3:
+        reasons.append(f"수급점수 {supply_score:+g}점으로 순매도 우위")
+    elif supply_score < 3:
+        reasons.append(f"수급점수 {supply_score:+g}점으로 뚜렷한 매수 우위 없음")
+    if news_score < 0:
+        reasons.append(f"뉴스점수 {news_score:+g}점으로 악재 반영")
+    elif news_score == 0:
+        reasons.append("뉴스 호재 점수 없음")
+    if rsi >= 80:
+        reasons.append(f"RSI {rsi:g}로 과열 부담 큼")
+    if row.get("정배열") != "Y":
+        reasons.append("5일·20일·60일 이동평균 정배열 아님")
+    if row.get("MACD") == "약세":
+        reasons.append("MACD 약세")
+    if _safe_float(row.get("거래량증가점수")) == 0:
+        reasons.append("거래량 증가 점수 없음")
+
+    if not reasons and final_score < 55:
+        reasons.append("관찰 이상 추천 기준 55점 미달")
+
+    return " | ".join(reasons)
+
 def make_score_sheet(
     volume_rank_df: pd.DataFrame,
     rise_rank_df: pd.DataFrame,
     trade_value_df: pd.DataFrame,
     chart_history_df: pd.DataFrame | None = None,
+    supply_demand_df: pd.DataFrame | None = None,
+    news_summary_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     score_map: dict[str, dict[str, Any]] = {}
 
@@ -378,12 +649,14 @@ def make_score_sheet(
 
     for code, item in score_map.items():
         metrics = _calc_technical_metrics(chart_history_df, code)
+        supply = _calc_supply_metrics(supply_demand_df, code)
+        news_info = _news_lookup(news_summary_df, code)
 
         r20_score = _return_score(metrics["20일수익률"], 10.0)
         r60_score = _return_score(metrics["60일수익률"], 10.0)
         volume_increase_score = _volume_increase_score(metrics["거래량증가율"], 10.0)
 
-        market_score = (
+        raw_market_score = (
             item["거래량점수"]
             + item["상승률점수"]
             + item["거래대금점수"]
@@ -395,30 +668,80 @@ def make_score_sheet(
             + metrics["RSI점수"]
             + metrics["MACD점수"]
         )
-        market_score = round(_clip(market_score, 0.0, MARKET_SCORE_MAX), 2)
-
-        news_score = round(
-            _clip(item["뉴스점수"], NEWS_SCORE_MIN, NEWS_SCORE_MAX),
+        raw_market_score = _clip(
+            raw_market_score,
+            0.0,
+            MARKET_SCORE_RAW_MAX,
+        )
+        market_score = round(
+            raw_market_score
+            / MARKET_SCORE_RAW_MAX
+            * MARKET_SCORE_MAX,
             2,
         )
+
+        supply_score = round(
+            _clip(
+                supply["수급점수"],
+                SUPPLY_SCORE_MIN,
+                SUPPLY_SCORE_MAX,
+            ),
+            2,
+        )
+
+        # 새 뉴스 분석 결과가 있으면 우선 사용하고,
+        # 없으면 기존 ranking 단계에서 전달된 뉴스점수를 사용한다.
+        news_score = news_info["뉴스점수"]
+        if (
+            news_info["뉴스요약"] == "관련 뉴스 없음"
+            and item["뉴스점수"] != 0
+        ):
+            news_score = round(
+                _clip(
+                    item["뉴스점수"],
+                    NEWS_SCORE_MIN,
+                    NEWS_SCORE_MAX,
+                ),
+                2,
+            )
 
         final_score = round(
-            _clip(market_score + news_score, FINAL_SCORE_MIN, FINAL_SCORE_MAX),
+            _clip(
+                market_score + supply_score + news_score,
+                FINAL_SCORE_MIN,
+                FINAL_SCORE_MAX,
+            ),
             2,
         )
 
-        news_summary = " | ".join(item["뉴스요약목록"][:5])
-        if not news_summary:
-            news_summary = "관련 뉴스 없음"
+        news_summary = news_info["뉴스요약"]
+        if news_summary == "관련 뉴스 없음":
+            legacy_summary = " | ".join(
+                item["뉴스요약목록"][:5]
+            )
+            if legacy_summary:
+                news_summary = legacy_summary
 
         if news_score > 0:
-            change_reason = f"시장점수 {market_score}점, 호재 뉴스 {news_score:+g}점 반영"
+            change_reason = (
+                f"시장 {market_score}점, 수급 {supply_score:+g}점, "
+                f"호재 뉴스 {news_score:+g}점 반영"
+            )
         elif news_score < 0:
-            change_reason = f"시장점수 {market_score}점, 악재 뉴스 {news_score:+g}점 반영"
+            change_reason = (
+                f"시장 {market_score}점, 수급 {supply_score:+g}점, "
+                f"악재 뉴스 {news_score:+g}점 반영"
+            )
         elif news_summary != "관련 뉴스 없음":
-            change_reason = f"시장점수 {market_score}점, 뉴스 감성평가 미연결로 뉴스점수 0점"
+            change_reason = (
+                f"시장 {market_score}점, 수급 {supply_score:+g}점, "
+                "뉴스는 있으나 중립 평가"
+            )
         else:
-            change_reason = f"시장점수 {market_score}점, 신규 뉴스점수 변동 없음"
+            change_reason = (
+                f"시장 {market_score}점, 수급 {supply_score:+g}점, "
+                "신규 뉴스 없음"
+            )
 
         row: dict[str, Any] = {
             "종목코드": item["종목코드"],
@@ -426,8 +749,24 @@ def make_score_sheet(
             "시장기준일": metrics["시장기준일"],
             "최종갱신일자": now.strftime("%Y-%m-%d"),
             "최종갱신시간": now.strftime("%H:%M:%S"),
+            "시장원점수": round(raw_market_score, 2),
             "시장점수": market_score,
+            "수급점수": supply_score,
+            "수급기준일": supply["수급기준일"],
+            "수급판단": supply["수급판단"],
+            "수급사유": supply.get("수급사유", ""),
+            "외국인순매수량": supply["외국인순매수량"],
+            "기관순매수량": supply["기관순매수량"],
+            "개인순매수량": supply["개인순매수량"],
+            "외국인3일합계": supply["외국인3일합계"],
+            "기관3일합계": supply["기관3일합계"],
+            "외국인연속순매수일": supply["외국인연속순매수일"],
+            "기관연속순매수일": supply["기관연속순매수일"],
             "뉴스점수": news_score,
+            "뉴스분석사유": news_info["뉴스분석사유"],
+            "뉴스건수": news_info["뉴스건수"],
+            "뉴스평가상태": news_info["뉴스평가상태"],
+            "뉴스신뢰도": news_info["뉴스신뢰도"],
             "AI점수": 0.0,
             "최종점수": final_score,
             # 기존 dashboard.py와 DB 호환을 위해 총점도 최종점수와 동일하게 유지한다.
@@ -467,6 +806,7 @@ def make_score_sheet(
         }
 
         row["AI추천사유"] = _make_reason(row)
+        row["추천제외사유"] = _make_exclusion_reasons(row)
         rows.append(row)
 
     result = pd.DataFrame(rows)
