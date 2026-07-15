@@ -171,8 +171,10 @@ def _calc_technical_metrics(
 ) -> dict[str, Any]:
     default = {
         "시장기준일": "",
+        "5일수익률": 0.0,
         "20일수익률": 0.0,
         "60일수익률": 0.0,
+        "20일변동성": 0.0,
         "거래량증가율": 0.0,
         "MA5": 0.0,
         "MA20": 0.0,
@@ -224,6 +226,10 @@ def _calc_technical_metrics(
 
     r20 = ((current_price / price_20) - 1) * 100 if price_20 else 0.0
     r60 = ((current_price / price_60) - 1) * 100 if price_60 else 0.0
+    price_5 = float(close.iloc[-6]) if len(close) >= 6 else float(close.iloc[0])
+    r5 = ((current_price / price_5) - 1) * 100 if price_5 else 0.0
+    daily_returns = close.pct_change().dropna() * 100
+    volatility20 = float(daily_returns.tail(20).std()) if not daily_returns.empty else 0.0
 
     recent_volume = float(volume.tail(5).mean())
     if len(volume) >= 25:
@@ -258,8 +264,10 @@ def _calc_technical_metrics(
 
     return {
         "시장기준일": _latest_market_date(df),
+        "5일수익률": round(r5, 2),
         "20일수익률": round(r20, 2),
         "60일수익률": round(r60, 2),
+        "20일변동성": round(volatility20, 2),
         "거래량증가율": round(volume_rate, 2),
         "MA5": round(ma5, 2),
         "MA20": round(ma20, 2),
@@ -550,6 +558,48 @@ def _make_reason(row: dict[str, Any]) -> str:
 
 
 
+def _calc_chase_risk(metrics: dict[str, Any]) -> tuple[int, str, str]:
+    """점수와 별개로 급등 추격·변동성 위험을 0~100으로 계산한다."""
+    score = 0
+    reasons: list[str] = []
+    r5 = _safe_float(metrics.get("5일수익률"))
+    volatility = _safe_float(metrics.get("20일변동성"))
+    volume_rate = _safe_float(metrics.get("거래량증가율"))
+    rsi = _safe_float(metrics.get("RSI"), 50.0)
+
+    if r5 >= 20:
+        score += 30
+        reasons.append(f"5일 {r5:.1f}% 급등")
+    elif r5 >= 10:
+        score += 20
+        reasons.append(f"5일 {r5:.1f}% 상승")
+    elif r5 >= 5:
+        score += 10
+        reasons.append(f"5일 {r5:.1f}% 상승")
+    if volatility >= 7:
+        score += 25
+        reasons.append(f"20일 일간 변동성 {volatility:.1f}%")
+    elif volatility >= 4:
+        score += 15
+        reasons.append(f"20일 일간 변동성 {volatility:.1f}%")
+    if volume_rate >= 300:
+        score += 20
+        reasons.append(f"거래량 {volume_rate:.0f}% 급증")
+    elif volume_rate >= 150:
+        score += 12
+        reasons.append(f"거래량 {volume_rate:.0f}% 증가")
+    if rsi >= 80:
+        score += 20
+        reasons.append(f"RSI {rsi:.0f} 과열")
+    elif rsi >= 70:
+        score += 10
+        reasons.append(f"RSI {rsi:.0f} 주의")
+
+    score = min(100, score)
+    level = "매우 높음" if score >= 70 else "높음" if score >= 45 else "보통" if score >= 20 else "낮음"
+    return score, level, " · ".join(reasons) if reasons else "추격 과열 신호가 뚜렷하지 않음"
+
+
 def _make_exclusion_reasons(row: dict[str, Any]) -> str:
     reasons: list[str] = []
 
@@ -651,6 +701,7 @@ def make_score_sheet(
         metrics = _calc_technical_metrics(chart_history_df, code)
         supply = _calc_supply_metrics(supply_demand_df, code)
         news_info = _news_lookup(news_summary_df, code)
+        chase_risk, risk_level, risk_reason = _calc_chase_risk(metrics)
 
         r20_score = _return_score(metrics["20일수익률"], 10.0)
         r60_score = _return_score(metrics["60일수익률"], 10.0)
@@ -773,6 +824,9 @@ def make_score_sheet(
             "총점": final_score,
             "등급": _grade(final_score),
             "최종추천": _recommendation(final_score),
+            "추격위험도": chase_risk,
+            "추격위험등급": risk_level,
+            "추격위험사유": risk_reason,
             "점수변동사유": change_reason,
             "뉴스평가상태": (
                 "평가완료"
@@ -784,9 +838,11 @@ def make_score_sheet(
             "거래량점수": item["거래량점수"],
             "상승률점수": item["상승률점수"],
             "거래대금점수": item["거래대금점수"],
+            "5일수익률(%)": metrics["5일수익률"],
             "20일수익률(%)": metrics["20일수익률"],
             "20일수익률점수": r20_score,
             "60일수익률(%)": metrics["60일수익률"],
+            "20일변동성(%)": metrics["20일변동성"],
             "60일수익률점수": r60_score,
             "거래량증가율(%)": metrics["거래량증가율"],
             "거래량증가점수": volume_increase_score,

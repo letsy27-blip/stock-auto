@@ -813,7 +813,7 @@ def show_classification_summary(
 
     st.subheader("업종·테마")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         metric_card("업종", industry or "미분류")
     with col2:
@@ -1572,6 +1572,14 @@ def show_stock_detail_by_code(
             latest.get("등급", ""),
             grade=True,
         )
+    with col4:
+        risk = safe_float(latest.get("추격위험도", 0))
+        risk_level = str(latest.get("추격위험등급", "미평가"))
+        metric_card("추격 위험", f"{risk:.0f}점 · {risk_level}")
+
+    risk_reason = str(latest.get("추격위험사유", "")).strip()
+    if risk_reason:
+        st.caption(f"추격 위험 근거: {risk_reason}")
 
     col4, col5, col6 = st.columns(3)
     with col4:
@@ -1645,8 +1653,8 @@ def show_stock_detail_by_code(
     cols = [
         "저장일자", "저장시간", "시장기준일", "최종갱신일자", "최종갱신시간",
         "점수순위", "시장점수", "뉴스점수", "AI점수", "최종점수", "총점",
-        "등급", "최종추천", "추천제외사유", "점수변동사유", "AI추천사유",
-        "20일수익률(%)", "60일수익률(%)", "거래량증가율(%)",
+        "등급", "최종추천", "추격위험도", "추격위험등급", "추격위험사유", "추천제외사유", "점수변동사유", "AI추천사유",
+        "5일수익률(%)", "20일수익률(%)", "60일수익률(%)", "20일변동성(%)", "거래량증가율(%)",
         "정배열", "신고가돌파", "RSI", "MACD", "뉴스요약",
     ]
     cols = [c for c in cols if c in stock_score_df.columns]
@@ -1960,6 +1968,7 @@ def show_today_top(
         1.65,  # 매매동향
         1.0,   # 뉴스
         0.85,  # 최종
+        1.2,   # 추격 위험
         1.0,   # 추천
     ]
 
@@ -1971,6 +1980,7 @@ def show_today_top(
         "매매동향",
         "뉴스",
         "최종",
+        "추격 위험",
         "추천",
     ]
 
@@ -2045,6 +2055,13 @@ def show_today_top(
             unsafe_allow_html=True,
         )
 
+        chase_risk = safe_float(row.get("추격위험도", 0))
+        risk_level = str(row.get("추격위험등급", "미평가"))
+        cols[7].markdown(
+            f"<div class='normal-text'>{chase_risk:.0f}점<br><small>{risk_level}</small></div>",
+            unsafe_allow_html=True,
+        )
+
         recommendation = str(
             row.get("최종추천", "")
         ).strip()
@@ -2061,7 +2078,7 @@ def show_today_top(
             "#374151",
         )
 
-        cols[7].markdown(
+        cols[8].markdown(
             (
                 "<div class='normal-text' "
                 f"style='color:{recommendation_color};"
@@ -2463,8 +2480,10 @@ def show_realtime_recommendations(
         columns[index].markdown(f"**{index + 1}. {name}**")
         columns[index].metric("현재가", value, delta)
         recommendation = str(row.get("최종추천", "추천 검토"))
+        chase_risk = safe_float(row.get("추격위험도", 0))
+        risk_level = str(row.get("추격위험등급", "미평가"))
         columns[index].caption(
-            f"{code} · 점수 {row[score_column]:.2f} · {recommendation}"
+            f"{code} · 점수 {row[score_column]:.2f} · {recommendation} · 추격위험 {chase_risk:.0f}점({risk_level})"
         )
         if recommendation in {"약세", "제외"}:
             columns[index].warning(
