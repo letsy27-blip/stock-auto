@@ -14,7 +14,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from ai.gemini_client import DEFAULT_MODEL, stream_chat
-from kis_api import get_access_token
+from kis_api import get_access_token, get_current_price
 from market_data import get_market_overview
 from sector_theme_strength import (
     make_industry_strength,
@@ -2338,12 +2338,76 @@ def show_sector_strength(
             "현재 강한 업종 TOP15",
         )
 
+@st.cache_data(ttl=20, show_spinner=False)
+def load_recommendation_quotes(stock_codes: tuple[str, ...]) -> dict[str, dict]:
+    """메인 추천 카드에 표시할 KIS 현재가를 한 번에 조회한다."""
+    token = get_access_token()
+    if not token:
+        return {}
+
+    quotes: dict[str, dict] = {}
+    for code in stock_codes:
+        body = get_current_price(token, code)
+        output = body.get("output", {}) if isinstance(body, dict) else {}
+        quotes[code] = {
+            "price": safe_float(output.get("stck_prpr")),
+            "change": safe_float(output.get("prdy_vrss")),
+            "change_rate": safe_float(output.get("prdy_ctrt")),
+        }
+    return quotes
+
+
+def show_realtime_recommendations(current_df: pd.DataFrame):
+    st.header("실시간 추천 TOP 3")
+
+    if current_df.empty:
+        st.info("추천 점수 데이터가 아직 없습니다.")
+        return
+
+    df = current_df.copy()
+    score_column = "최종점수" if "최종점수" in df.columns else "총점"
+    if score_column not in df.columns:
+        st.info("추천 점수 컬럼을 찾지 못했습니다.")
+        return
+
+    df[score_column] = pd.to_numeric(df[score_column], errors="coerce").fillna(0)
+    top3 = df.sort_values(score_column, ascending=False).head(3).copy()
+    codes = tuple(clean_code(code) for code in top3["종목코드"].tolist())
+    quotes = load_recommendation_quotes(codes)
+
+    columns = st.columns(len(top3))
+    for index, (_, row) in enumerate(top3.iterrows()):
+        code = clean_code(row.get("종목코드", ""))
+        name = str(row.get("종목명", code))
+        quote_data = quotes.get(code, {})
+        price = quote_data.get("price", 0)
+        change = quote_data.get("change", 0)
+        change_rate = quote_data.get("change_rate", 0)
+
+        if price:
+            value = f"{price:,.0f}원"
+            delta = f"{change:+,.0f}원 ({change_rate:+.2f}%)"
+        else:
+            value = "현재가 조회 대기"
+            delta = "KIS 현재가 미수신"
+
+        columns[index].metric(f"{index + 1}. {name}", value, delta)
+        recommendation = str(row.get("최종추천", "추천 검토"))
+        columns[index].caption(
+            f"{code} · 점수 {row[score_column]:.2f} · {recommendation}"
+        )
+
+    st.caption("현재가는 KIS 조회값이며, 약 20초마다 새로 조회됩니다.")
+
+
 def show_market_home(
     current_df: pd.DataFrame,
     history_df: pd.DataFrame,
     chart_df: pd.DataFrame,
     master_df: pd.DataFrame,
 ):
+    show_realtime_recommendations(current_df)
+    st.divider()
     show_market_overview()
 
     st.divider()
