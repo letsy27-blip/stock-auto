@@ -899,13 +899,15 @@ def make_stock_links(stock_name: str, stock_code: str):
         )
     else:
         # KIS에는 영문이 포함된 ETF·ETN 등의 종목코드가 있다. 이 코드는
-        # 네이버증권의 6자리 숫자 코드가 아니므로 직접 링크하면 증권 홈으로
-        # 이동한다. 잘못된 링크 대신 종목명 검색을 제공한다.
+        # 네이버증권의 6자리 숫자 코드가 아니므로 외부 차트 서비스를 쓴다.
         col1.link_button(
-            "네이버 종목 검색",
-            f"https://search.naver.com/search.naver?query={encoded_name}+주식",
+            "TradingView 차트",
+            f"https://kr.tradingview.com/symbols/KRX-{code}/",
         )
-        col2.caption("네이버 차트 직접 연결 미지원")
+        col2.link_button(
+            "한국경제 차트",
+            f"https://markets.hankyung.com/stock/{code}/chart",
+        )
     col3.link_button(
         "네이버 뉴스",
         f"https://search.naver.com/search.naver?where=news&query={encoded_name}",
