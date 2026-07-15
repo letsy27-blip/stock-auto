@@ -210,6 +210,26 @@ def _migrate_old_table_if_needed(conn: sqlite3.Connection) -> None:
                 f'ADD COLUMN "{column}" {sql_type}'
             )
 
+    # 과거에는 일반 데이터 저장기가 stock_classification 테이블을 먼저
+    # 만들 수 있어 종목코드 PRIMARY KEY가 없는 경우가 있다. UPSERT가
+    # 항상 동작하도록 최신 행만 남긴 뒤 고유 인덱스를 보장한다.
+    conn.execute(
+        """
+        DELETE FROM stock_classification
+        WHERE rowid NOT IN (
+            SELECT MAX(rowid)
+            FROM stock_classification
+            GROUP BY 종목코드
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_classification_code
+        ON stock_classification(종목코드)
+        """
+    )
+
     conn.commit()
 
 
