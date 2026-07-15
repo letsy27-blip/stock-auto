@@ -1,3 +1,4 @@
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -8,6 +9,8 @@ from config import APP_KEY, APP_SECRET, BASE_URL
 
 
 REQUEST_TIMEOUT = 20
+_TOKEN_CACHE: dict[str, float | str] = {"value": "", "expires_at": 0.0}
+_TOKEN_LOCK = threading.Lock()
 
 
 def _headers(token: str, tr_id: str) -> dict:
@@ -29,27 +32,38 @@ def _safe_int(value) -> int:
 
 
 def get_access_token():
-    url = f"{BASE_URL}/oauth2/tokenP"
-    headers = {"content-type": "application/json"}
-    body = {
-        "grant_type": "client_credentials",
-        "appkey": APP_KEY,
-        "appsecret": APP_SECRET,
-    }
+    # KIS는 접근토큰 발급을 분당 1회로 제한한다. 대시보드의 반복 렌더링에서는
+    # 이미 받은 토큰을 재사용해야 현재가·실시간 시세가 정상 동작한다.
+    with _TOKEN_LOCK:
+        if _TOKEN_CACHE["value"] and time.time() < _TOKEN_CACHE["expires_at"]:
+            return str(_TOKEN_CACHE["value"])
 
-    try:
-        res = requests.post(
-            url,
-            headers=headers,
-            json=body,
-            timeout=REQUEST_TIMEOUT,
-        )
-        res.raise_for_status()
-        data = res.json()
-        return data.get("access_token")
-    except Exception as exc:
-        print("접근토큰 발급 실패:", exc)
-        return None
+        url = f"{BASE_URL}/oauth2/tokenP"
+        headers = {"content-type": "application/json"}
+        body = {
+            "grant_type": "client_credentials",
+            "appkey": APP_KEY,
+            "appsecret": APP_SECRET,
+        }
+
+        try:
+            res = requests.post(
+                url,
+                headers=headers,
+                json=body,
+                timeout=REQUEST_TIMEOUT,
+            )
+            res.raise_for_status()
+            data = res.json()
+            token = data.get("access_token")
+            if token:
+                expires_in = int(data.get("expires_in", 24 * 60 * 60))
+                _TOKEN_CACHE["value"] = token
+                _TOKEN_CACHE["expires_at"] = time.time() + max(60, expires_in - 60)
+            return token
+        except Exception as exc:
+            print("접근토큰 발급 실패:", exc)
+            return None
 
 
 def get_current_price(token, stock_code):
