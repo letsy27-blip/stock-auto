@@ -217,6 +217,10 @@ def run_once():
         rise_rank_df,
         trade_value_df,
     )
+    if candidate_df.empty:
+        raise RuntimeError(
+            "추천 후보를 만들지 못했습니다. KIS 순위 조회 결과와 API 설정을 확인하세요."
+        )
 
     chart_history_df = make_chart_history_data(
         token=token,
@@ -258,6 +262,10 @@ def run_once():
         supply_demand_df=supply_demand_df,
         news_summary_df=news_summary_df,
     )
+    if scored_df.empty:
+        raise RuntimeError(
+            "추천 점수 생성 결과가 비어 있습니다. 수집 API 응답을 확인하세요."
+        )
 
     classification_df = update_stock_classifications(
         candidate_df=candidate_df,

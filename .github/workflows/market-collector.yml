@@ -55,6 +55,27 @@ jobs:
             exit 1
           fi
 
+      - name: Verify recommendation scores are current
+        run: |
+          python - <<'PY'
+          import sqlite3
+          import sys
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+          with sqlite3.connect("stock_data.db") as conn:
+              row = conn.execute(
+                  'SELECT MAX("최종갱신일자") FROM "score"'
+              ).fetchone()
+
+          latest = row[0] if row else None
+          if latest != today:
+              print(f"Recommendation score is stale: {latest!r}; expected {today}")
+              sys.exit(1)
+          print(f"Recommendation score date verified: {latest}")
+          PY
+
       - name: Commit updated data
         run: |
           if git diff --quiet -- stock_data.db; then
