@@ -19,6 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
+      # Python의 datetime.now()가 장중 기준인 한국 시간을 기록하도록 고정한다.
+      TZ: Asia/Seoul
       KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
       KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
       KIS_BASE_URL: ${{ secrets.KIS_BASE_URL }}
