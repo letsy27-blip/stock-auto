@@ -1042,24 +1042,52 @@ def show_price_volume_charts(chart_df: pd.DataFrame, stock_name: str, stock_code
         st.warning("해당 종목의 차트 데이터가 없습니다. 추천 대상에 들어온 적이 없거나 아직 일봉 데이터가 저장되지 않았습니다.")
         return
 
-    if "종가" in stock_chart_df.columns and stock_chart_df["종가"].notna().any():
-        st.subheader("주가 차트")
-        fig_price = px.line(
-            stock_chart_df,
-            x="날짜",
-            y="종가",
-            markers=True,
-            title=f"{stock_name} 종가 추이",
-        )
-        st.plotly_chart(fig_price, use_container_width=True)
+    if "종가" not in stock_chart_df.columns or not stock_chart_df["종가"].notna().any():
+        st.warning("종가 데이터가 없어 차트를 표시할 수 없습니다.")
+        return
 
-    if "거래량" in stock_chart_df.columns and stock_chart_df["거래량"].notna().any():
-        st.subheader("거래량 차트")
+    st.subheader("종가 차트")
+    interval = st.radio(
+        "차트 기준",
+        ["일봉", "월봉", "연봉"],
+        horizontal=True,
+        key=f"chart_interval_{clean_code(stock_code)}",
+    )
+    chart_data = stock_chart_df[["날짜", "종가", "거래량"]].copy()
+    chart_data = chart_data.dropna(subset=["날짜", "종가"]).sort_values("날짜")
+
+    if interval == "월봉":
+        chart_data = (
+            chart_data.set_index("날짜")
+            .resample("ME")
+            .agg({"종가": "last", "거래량": "sum"})
+            .dropna(subset=["종가"])
+            .reset_index()
+        )
+    elif interval == "연봉":
+        chart_data = (
+            chart_data.set_index("날짜")
+            .resample("YE")
+            .agg({"종가": "last", "거래량": "sum"})
+            .dropna(subset=["종가"])
+            .reset_index()
+        )
+
+    fig_price = px.line(
+        chart_data,
+        x="날짜",
+        y="종가",
+        markers=True,
+        title=f"{stock_name} {interval} 종가 추이",
+    )
+    st.plotly_chart(fig_price, use_container_width=True)
+
+    if chart_data["거래량"].notna().any():
         fig_volume = px.bar(
-            stock_chart_df,
+            chart_data,
             x="날짜",
             y="거래량",
-            title=f"{stock_name} 거래량 추이",
+            title=f"{stock_name} {interval} 거래량",
         )
         st.plotly_chart(fig_volume, use_container_width=True)
 
