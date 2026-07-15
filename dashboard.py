@@ -2386,7 +2386,15 @@ def load_recommendation_quotes(stock_codes: tuple[str, ...]) -> dict[str, dict]:
     return quotes
 
 
-def show_realtime_recommendations(current_df: pd.DataFrame):
+def show_realtime_recommendations(
+    current_df: pd.DataFrame,
+    score_df: pd.DataFrame,
+    chart_df: pd.DataFrame,
+    supply_df: pd.DataFrame,
+    news_df: pd.DataFrame,
+    classification_df: pd.DataFrame,
+    theme_history_df: pd.DataFrame,
+):
     st.header("실시간 추천 TOP 3")
 
     if current_df.empty:
@@ -2400,7 +2408,23 @@ def show_realtime_recommendations(current_df: pd.DataFrame):
         return
 
     df[score_column] = pd.to_numeric(df[score_column], errors="coerce").fillna(0)
-    top3 = df.sort_values(score_column, ascending=False).head(3).copy()
+    # 단순 급등·거래량 순위가 아니라 실제 추천 가능한 후보만 메인에 노출한다.
+    # 약세/제외 종목은 TOP3 분석 대상일 수는 있어도 추천 카드가 될 수 없다.
+    recommendation = df.get("최종추천", pd.Series("", index=df.index)).astype(str)
+    eligible = df[(df[score_column] >= 55) & ~recommendation.isin(["약세", "제외"])]
+    top3 = eligible.sort_values(score_column, ascending=False).head(3).copy()
+    if top3.empty:
+        st.info("현재 기준으로 55점 이상인 추천 가능 종목이 없습니다. 급등 테마주를 억지로 추천하지 않습니다.")
+        return
+
+    detail_popup = make_stock_dialog(
+        score_df=score_df,
+        chart_df=chart_df,
+        supply_df=supply_df,
+        news_df=news_df,
+        classification_df=classification_df,
+        theme_history_df=theme_history_df,
+    )
     codes = tuple(clean_code(code) for code in top3["종목코드"].tolist())
     realtime_enabled = st.toggle(
         "초단위 체결가 반영",
@@ -2447,6 +2471,8 @@ def show_realtime_recommendations(current_df: pd.DataFrame):
         columns[index].caption(
             f"{code} · 점수 {row[score_column]:.2f} · {recommendation}"
         )
+        if columns[index].button("상세 분석 보기", key=f"realtime_detail_{code}"):
+            detail_popup(name, code)
 
     if realtime_enabled:
         st.caption(realtime_status)
@@ -2459,6 +2485,10 @@ def show_market_home(
     history_df: pd.DataFrame,
     chart_df: pd.DataFrame,
     master_df: pd.DataFrame,
+    supply_df: pd.DataFrame,
+    news_df: pd.DataFrame,
+    classification_df: pd.DataFrame,
+    theme_history_df: pd.DataFrame,
 ):
     combined_df = pd.concat(
         [history_df, current_df],
@@ -2477,7 +2507,15 @@ def show_market_home(
     show_market_overview()
 
     st.divider()
-    show_realtime_recommendations(current_df)
+    show_realtime_recommendations(
+        current_df=current_df,
+        score_df=combined_df,
+        chart_df=chart_df,
+        supply_df=supply_df,
+        news_df=news_df,
+        classification_df=classification_df,
+        theme_history_df=theme_history_df,
+    )
 
 
 def show_intraday_flow(snapshot_df: pd.DataFrame):
@@ -3133,6 +3171,10 @@ def main():
             history_df=history_df,
             chart_df=chart_df,
             master_df=master_df,
+            supply_df=supply_df,
+            news_df=news_df,
+            classification_df=classification_df,
+            theme_history_df=theme_history_df,
         )
         return
 
