@@ -3,9 +3,9 @@ name: Korean market collector
 on:
   workflow_dispatch:
   schedule:
-    # UTC 기준 00:07/37~06:07/37 = 한국 시간 평일 09:07/37~15:07/37
-    # 정각을 피해 GitHub Actions 예약 지연 가능성을 줄인다.
-    - cron: "7,37 0-6 * * 1-5"
+    # UTC 00:05/35~06:05/35 = 한국 시간 평일 09:05/35~15:05/35
+    # 정각 혼잡을 피하면서 장중 30분 단위로 실행한다.
+    - cron: "5,35 0-6 * * 1-5"
 
 permissions:
   contents: write
@@ -47,6 +47,13 @@ jobs:
 
       - name: Collect market data once
         run: python main.py --once
+
+      - name: Verify dashboard database was updated
+        run: |
+          if git diff --quiet -- stock_data.db; then
+            echo "Collection finished without updating stock_data.db. Check the Collect market data once log."
+            exit 1
+          fi
 
       - name: Commit updated data
         run: |

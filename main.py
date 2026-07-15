@@ -194,8 +194,9 @@ def make_chart_history_data(token, candidate_df, days=60):
 def run_once():
     token = get_access_token()
     if not token:
-        print("토큰 발급 실패")
-        return
+        # 호출 측(GitHub Actions 포함)이 수집 실패를 정상 완료로 오해하지 않도록
+        # 실패를 명시적으로 전파한다.
+        raise RuntimeError("접근토큰 발급에 실패했습니다. KIS API 키와 비밀키를 확인하세요.")
 
     print("토큰 발급 성공")
 
@@ -450,7 +451,8 @@ if __name__ == "__main__":
     args = parse_args()
 
     if args.once:
-        run_once_safely()
+        if not run_once_safely():
+            raise SystemExit(1)
     else:
         # 기본값도 장중 자동 모드로 동작
         run_intraday_scheduler()
