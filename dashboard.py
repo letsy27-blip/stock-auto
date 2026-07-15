@@ -1573,9 +1573,13 @@ def show_stock_detail_by_code(
             grade=True,
         )
     with col4:
-        risk = safe_float(latest.get("추격위험도", 0))
-        risk_level = str(latest.get("추격위험등급", "미평가"))
-        metric_card("추격 위험", f"{risk:.0f}점 · {risk_level}")
+        has_chase_risk = "추격위험도" in latest.index and pd.notna(latest.get("추격위험도"))
+        if has_chase_risk:
+            risk = safe_float(latest.get("추격위험도"))
+            risk_level = str(latest.get("추격위험등급", ""))
+            metric_card("추격 위험", f"{risk:.0f}점 · {risk_level}")
+        else:
+            metric_card("추격 위험", "—")
 
     risk_reason = str(latest.get("추격위험사유", "")).strip()
     if risk_reason:
@@ -2066,10 +2070,14 @@ def show_today_top(
             unsafe_allow_html=True,
         )
 
-        chase_risk = safe_float(row.get("추격위험도", 0))
-        risk_level = str(row.get("추격위험등급", "미평가"))
+        has_chase_risk = "추격위험도" in row.index and pd.notna(row.get("추격위험도"))
+        chase_risk = safe_float(row.get("추격위험도"))
+        risk_level = str(row.get("추격위험등급", ""))
         cols[7].markdown(
-            f"<div class='normal-text'>{chase_risk:.0f}점<br><small>{risk_level}</small></div>",
+            (
+                f"<div class='normal-text'>{chase_risk:.0f}점<br><small>{risk_level}</small></div>"
+                if has_chase_risk else "<div class='normal-text'>—</div>"
+            ),
             unsafe_allow_html=True,
         )
 
@@ -2491,10 +2499,12 @@ def show_realtime_recommendations(
         columns[index].markdown(f"**{index + 1}. {name}**")
         columns[index].metric("현재가", value, delta)
         recommendation = str(row.get("최종추천", "추천 검토"))
-        chase_risk = safe_float(row.get("추격위험도", 0))
-        risk_level = str(row.get("추격위험등급", "미평가"))
+        has_chase_risk = "추격위험도" in row.index and pd.notna(row.get("추격위험도"))
+        chase_risk = safe_float(row.get("추격위험도"))
+        risk_level = str(row.get("추격위험등급", ""))
+        risk_text = f" · 추격위험 {chase_risk:.0f}점({risk_level})" if has_chase_risk else ""
         columns[index].caption(
-            f"{code} · 점수 {row[score_column]:.2f} · {recommendation} · 진입 {row.get('진입판단', '갱신 대기')} · 추격위험 {chase_risk:.0f}점({risk_level})"
+            f"{code} · 점수 {row[score_column]:.2f} · {recommendation} · 진입 {row.get('진입판단', '갱신 대기')}{risk_text}"
         )
         if recommendation in {"약세", "제외"}:
             columns[index].warning(
