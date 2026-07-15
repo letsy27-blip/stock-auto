@@ -175,6 +175,14 @@ def _calc_technical_metrics(
         "20일수익률": 0.0,
         "60일수익률": 0.0,
         "20일변동성": 0.0,
+        "최근지지선": 0.0,
+        "최근저항선": 0.0,
+        "진입타이밍점수": 0.0,
+        "진입판단": "데이터 부족",
+        "진입판단사유": "가격 이력이 부족합니다.",
+        "손절기준": 0.0,
+        "목표저항선": 0.0,
+        "돌파신뢰도": 0.0,
         "거래량증가율": 0.0,
         "MA5": 0.0,
         "MA20": 0.0,
@@ -241,6 +249,14 @@ def _calc_technical_metrics(
 
     volume_rate = ((recent_volume / base_volume) - 1) * 100 if base_volume else 0.0
 
+    previous_close = close.iloc[-21:-1] if len(close) >= 21 else close.iloc[:-1]
+    if previous_close.empty:
+        support = current_price
+        resistance = current_price
+    else:
+        support = float(previous_close.tail(20).min())
+        resistance = float(previous_close.tail(20).max())
+
     ma5 = float(close.rolling(5).mean().iloc[-1]) if len(close) >= 5 else current_price
     ma20 = float(close.rolling(20).mean().iloc[-1]) if len(close) >= 20 else current_price
     ma60 = float(close.rolling(60).mean().iloc[-1]) if len(close) >= 60 else current_price
@@ -262,12 +278,51 @@ def _calc_technical_metrics(
 
     macd_status, macd_score = _calc_macd(close)
 
+    timing_score = 0.0
+    entry_judgement = "관망"
+    entry_reason = "지지·저항 사이 구간으로 방향 확인이 필요합니다."
+    breakout_confidence = 35.0
+    if current_price < support * 0.99:
+        timing_score = -10.0
+        entry_judgement = "위험"
+        entry_reason = "최근 지지선을 이탈해 하락 확대 가능성을 확인해야 합니다."
+        breakout_confidence = 15.0
+    elif current_price >= resistance:
+        if volume_rate >= 50:
+            timing_score = 10.0
+            entry_judgement = "돌파 확인"
+            entry_reason = "최근 저항선을 거래량 증가와 함께 돌파했습니다."
+            breakout_confidence = min(95.0, 65.0 + min(30.0, volume_rate / 10))
+        else:
+            timing_score = 3.0
+            entry_judgement = "돌파 관찰"
+            entry_reason = "저항선은 넘었지만 거래량 동반 여부를 확인해야 합니다."
+            breakout_confidence = 45.0
+    elif current_price <= support * 1.03 and rsi <= 60:
+        timing_score = 6.0
+        entry_judgement = "지지선 근처"
+        entry_reason = "최근 지지선 부근이며 과열 신호가 크지 않습니다."
+        breakout_confidence = 55.0
+    elif current_price >= resistance * 0.97:
+        timing_score = -4.0
+        entry_judgement = "관망"
+        entry_reason = "최근 저항선 바로 아래라 돌파 거래량 확인 전 추격은 주의가 필요합니다."
+        breakout_confidence = 30.0
+
     return {
         "시장기준일": _latest_market_date(df),
         "5일수익률": round(r5, 2),
         "20일수익률": round(r20, 2),
         "60일수익률": round(r60, 2),
         "20일변동성": round(volatility20, 2),
+        "최근지지선": round(support, 2),
+        "최근저항선": round(resistance, 2),
+        "진입타이밍점수": timing_score,
+        "진입판단": entry_judgement,
+        "진입판단사유": entry_reason,
+        "손절기준": round(support * 0.98, 2),
+        "목표저항선": round(current_price * 1.1 if current_price >= resistance else resistance, 2),
+        "돌파신뢰도": round(breakout_confidence, 0),
         "거래량증가율": round(volume_rate, 2),
         "MA5": round(ma5, 2),
         "MA20": round(ma20, 2),
@@ -758,7 +813,7 @@ def make_score_sheet(
 
         final_score = round(
             _clip(
-                market_score + supply_score + news_score,
+                market_score + supply_score + news_score + metrics["진입타이밍점수"],
                 FINAL_SCORE_MIN,
                 FINAL_SCORE_MAX,
             ),
@@ -824,6 +879,14 @@ def make_score_sheet(
             "총점": final_score,
             "등급": _grade(final_score),
             "최종추천": _recommendation(final_score),
+            "진입판단": metrics["진입판단"],
+            "진입판단사유": metrics["진입판단사유"],
+            "진입타이밍점수": metrics["진입타이밍점수"],
+            "최근지지선": metrics["최근지지선"],
+            "최근저항선": metrics["최근저항선"],
+            "손절기준": metrics["손절기준"],
+            "목표저항선": metrics["목표저항선"],
+            "돌파신뢰도": metrics["돌파신뢰도"],
             "추격위험도": chase_risk,
             "추격위험등급": risk_level,
             "추격위험사유": risk_reason,

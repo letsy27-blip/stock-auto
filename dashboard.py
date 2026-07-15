@@ -1581,6 +1581,17 @@ def show_stock_detail_by_code(
     if risk_reason:
         st.caption(f"추격 위험 근거: {risk_reason}")
 
+    st.subheader("진입 판단")
+    entry = str(latest.get("진입판단", "데이터 갱신 대기"))
+    entry_reason = str(latest.get("진입판단사유", "")).strip()
+    timing_score = safe_float(latest.get("진입타이밍점수", 0))
+    st.info(f"{entry} · 타이밍 점수 {timing_score:+.0f}점" + (f"\n\n{entry_reason}" if entry_reason else ""))
+    entry_col1, entry_col2, entry_col3, entry_col4 = st.columns(4)
+    entry_col1.metric("최근 지지선", f"{safe_float(latest.get('최근지지선')):,.0f}원")
+    entry_col2.metric("최근 저항선", f"{safe_float(latest.get('최근저항선')):,.0f}원")
+    entry_col3.metric("손절 기준", f"{safe_float(latest.get('손절기준')):,.0f}원")
+    entry_col4.metric("돌파 신뢰도", f"{safe_float(latest.get('돌파신뢰도')):.0f}%")
+
     col4, col5, col6 = st.columns(3)
     with col4:
         metric_card("RSI", latest.get("RSI", ""))
@@ -1653,7 +1664,7 @@ def show_stock_detail_by_code(
     cols = [
         "저장일자", "저장시간", "시장기준일", "최종갱신일자", "최종갱신시간",
         "점수순위", "시장점수", "뉴스점수", "AI점수", "최종점수", "총점",
-        "등급", "최종추천", "추격위험도", "추격위험등급", "추격위험사유", "추천제외사유", "점수변동사유", "AI추천사유",
+        "등급", "최종추천", "진입판단", "진입타이밍점수", "최근지지선", "최근저항선", "손절기준", "목표저항선", "돌파신뢰도", "추격위험도", "추격위험등급", "추격위험사유", "추천제외사유", "점수변동사유", "AI추천사유",
         "5일수익률(%)", "20일수익률(%)", "60일수익률(%)", "20일변동성(%)", "거래량증가율(%)",
         "정배열", "신고가돌파", "RSI", "MACD", "뉴스요약",
     ]
@@ -2483,7 +2494,7 @@ def show_realtime_recommendations(
         chase_risk = safe_float(row.get("추격위험도", 0))
         risk_level = str(row.get("추격위험등급", "미평가"))
         columns[index].caption(
-            f"{code} · 점수 {row[score_column]:.2f} · {recommendation} · 추격위험 {chase_risk:.0f}점({risk_level})"
+            f"{code} · 점수 {row[score_column]:.2f} · {recommendation} · 진입 {row.get('진입판단', '갱신 대기')} · 추격위험 {chase_risk:.0f}점({risk_level})"
         )
         if recommendation in {"약세", "제외"}:
             columns[index].warning(
