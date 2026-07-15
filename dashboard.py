@@ -2408,14 +2408,9 @@ def show_realtime_recommendations(
         return
 
     df[score_column] = pd.to_numeric(df[score_column], errors="coerce").fillna(0)
-    # 단순 급등·거래량 순위가 아니라 실제 추천 가능한 후보만 메인에 노출한다.
-    # 약세/제외 종목은 TOP3 분석 대상일 수는 있어도 추천 카드가 될 수 없다.
-    recommendation = df.get("최종추천", pd.Series("", index=df.index)).astype(str)
-    eligible = df[(df[score_column] >= 55) & ~recommendation.isin(["약세", "제외"])]
-    top3 = eligible.sort_values(score_column, ascending=False).head(3).copy()
-    if top3.empty:
-        st.info("현재 기준으로 55점 이상인 추천 가능 종목이 없습니다. 급등 테마주를 억지로 추천하지 않습니다.")
-        return
+    # 테마·급등주도 후보에서 배제하지 않는다. 대신 상세 근거와 위험 판정을
+    # 같이 보여줘 사용자가 모멘텀 매매 후보인지, 실제 매수 추천인지 구분한다.
+    top3 = df.sort_values(score_column, ascending=False).head(3).copy()
 
     detail_popup = make_stock_dialog(
         score_df=score_df,
@@ -2471,6 +2466,11 @@ def show_realtime_recommendations(
         columns[index].caption(
             f"{code} · 점수 {row[score_column]:.2f} · {recommendation}"
         )
+        if recommendation in {"약세", "제외"}:
+            columns[index].warning(
+                "점수 상위 후보이지만 현재 매수 추천은 아닙니다. "
+                "상세 분석에서 급등 사유와 위험 요인을 확인하세요."
+            )
         if columns[index].button("상세 분석 보기", key=f"realtime_detail_{code}"):
             detail_popup(name, code)
 
