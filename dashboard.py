@@ -3,11 +3,15 @@ import re
 import json
 import sqlite3
 from datetime import date, datetime, timedelta
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from urllib.parse import quote
 
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 from ai.gemini_client import DEFAULT_MODEL, stream_chat
 from kis_api import get_access_token
@@ -17,7 +21,81 @@ from sector_theme_strength import (
     make_theme_strength,
 )
 
-DB_NAME = "stock_data.db"
+DB_PATH = Path(__file__).resolve().with_name("stock_data.db")
+DB_NAME = str(DB_PATH)
+REMOTE_DB_URL = (
+    "https://raw.githubusercontent.com/letsy27-blip/stock-auto/"
+    "main/stock_data.db"
+)
+DB_SYNC_INTERVAL_SECONDS = 60
+
+
+def _is_valid_database(path: Path) -> bool:
+    conn = None
+    try:
+        conn = sqlite3.connect(path)
+        quick_check = conn.execute("PRAGMA quick_check").fetchone()[0]
+        has_score = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'score'"
+        ).fetchone()
+        return quick_check == "ok" and has_score is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def sync_database_from_github() -> None:
+    """GitHub Actions가 갱신한 DB를 로컬/배포 대시보드에 반영한다."""
+    now = datetime.now().timestamp()
+    last_check = st.session_state.get("db_sync_last_check", 0.0)
+    if now - last_check < DB_SYNC_INTERVAL_SECONDS:
+        return
+    st.session_state["db_sync_last_check"] = now
+
+    try:
+        head = requests.head(
+            REMOTE_DB_URL,
+            headers={"Cache-Control": "no-cache"},
+            timeout=10,
+            allow_redirects=True,
+        )
+        head.raise_for_status()
+        remote_etag = head.headers.get("ETag", "")
+
+        if remote_etag and remote_etag == st.session_state.get("db_sync_etag"):
+            return
+
+        response = requests.get(
+            REMOTE_DB_URL,
+            headers={"Cache-Control": "no-cache"},
+            timeout=30,
+        )
+        response.raise_for_status()
+
+        with NamedTemporaryFile(
+            mode="wb",
+            suffix=".db",
+            prefix="stock_data_",
+            dir=DB_PATH.parent,
+            delete=False,
+        ) as temporary_file:
+            temporary_file.write(response.content)
+            temporary_path = Path(temporary_file.name)
+
+        try:
+            if not _is_valid_database(temporary_path):
+                raise RuntimeError("GitHub에서 받은 DB 파일 검증에 실패했습니다.")
+            os.replace(temporary_path, DB_PATH)
+            st.session_state["db_sync_etag"] = remote_etag
+            st.session_state["db_sync_message"] = "GitHub 최신 DB 동기화 완료"
+        finally:
+            temporary_path.unlink(missing_ok=True)
+    except (requests.RequestException, OSError, RuntimeError) as exc:
+        # 네트워크 문제여도 기존 DB로 대시보드는 계속 표시한다.
+        st.session_state["db_sync_message"] = f"DB 동기화 보류: {exc}"
 
 st.set_page_config(page_title="주식 추천 대시보드", layout="wide")
 
@@ -2863,6 +2941,13 @@ def show_ai_analysis(score_df: pd.DataFrame, chart_df: pd.DataFrame, master_df: 
 # -----------------------------
 def main():
     st.title("주식 추천 대시보드")
+
+    # 화면을 열어 둔 상태에서도 1분마다 새 DB를 확인한다.
+    st_autorefresh(
+        interval=DB_SYNC_INTERVAL_SECONDS * 1000,
+        key="dashboard_db_auto_refresh",
+    )
+    sync_database_from_github()
 
     all_score_df = normalize_score_df(
         load_table("score")
