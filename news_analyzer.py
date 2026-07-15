@@ -635,7 +635,14 @@ def analyze_news_by_stock_with_gemini(
         fingerprint=_make_fingerprint(stock_code,group)
         cached=_load_cached_analysis(stock_code,fingerprint)
 
-        if cached is not None:
+        # Gemini 호출 실패 기록은 재시도 시점까지 그대로 '분석 대기'로
+        # 노출하지 않는다. 무료 규칙 분석을 즉시 사용해야 뉴스가 미분석으로
+        # 남지 않고, Gemini가 복구되면 그때 정밀 분석으로 갱신할 수 있다.
+        if cached is not None and str(cached.get("분석상태", "")) in {"대기", "실패"}:
+            result = _analyze_news_with_rules(stock_name, group)
+            result["뉴스분석사유"] += " Gemini 정밀 분석은 재시도 대기 중이며 무료 1차 분석 결과를 표시합니다."
+            print(f"무료 1차 뉴스 분석 유지: {stock_name}({stock_code})")
+        elif cached is not None:
             result=cached
             print(f"Gemini 뉴스 캐시 사용: {stock_name}({stock_code})")
         elif (
