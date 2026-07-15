@@ -16,6 +16,7 @@ from streamlit_autorefresh import st_autorefresh
 from ai.gemini_client import DEFAULT_MODEL, stream_chat
 from kis_api import get_access_token, get_current_price
 from market_data import get_market_overview
+from realtime_quotes import get_realtime_quote_hub
 from sector_theme_strength import (
     make_industry_strength,
     make_theme_strength,
@@ -2373,7 +2374,28 @@ def show_realtime_recommendations(current_df: pd.DataFrame):
     df[score_column] = pd.to_numeric(df[score_column], errors="coerce").fillna(0)
     top3 = df.sort_values(score_column, ascending=False).head(3).copy()
     codes = tuple(clean_code(code) for code in top3["종목코드"].tolist())
-    quotes = load_recommendation_quotes(codes)
+    realtime_enabled = st.toggle(
+        "초단위 체결가 반영",
+        value=True,
+        key="realtime_recommendation_quotes",
+    )
+    quotes: dict[str, dict] = {}
+    realtime_status = ""
+    if realtime_enabled:
+        hub = get_realtime_quote_hub()
+        hub.ensure_codes(codes)
+        realtime = hub.snapshot(codes)
+        quotes = realtime["quotes"]
+        if realtime["connected"]:
+            realtime_status = "KIS WebSocket 실시간 연결됨"
+        elif realtime["error"]:
+            realtime_status = f"실시간 연결 재시도 중: {realtime['error']}"
+        else:
+            realtime_status = "KIS WebSocket 연결 중"
+        st_autorefresh(interval=1000, key="realtime_recommendation_refresh")
+
+    if not quotes:
+        quotes = load_recommendation_quotes(codes)
 
     columns = st.columns(len(top3))
     for index, (_, row) in enumerate(top3.iterrows()):
@@ -2397,7 +2419,10 @@ def show_realtime_recommendations(current_df: pd.DataFrame):
             f"{code} · 점수 {row[score_column]:.2f} · {recommendation}"
         )
 
-    st.caption("현재가는 KIS 조회값이며, 약 20초마다 새로 조회됩니다.")
+    if realtime_enabled:
+        st.caption(realtime_status)
+    else:
+        st.caption("현재가는 KIS REST 조회값이며, 약 20초마다 새로 조회됩니다.")
 
 
 def show_market_home(
