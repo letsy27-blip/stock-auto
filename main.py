@@ -326,7 +326,7 @@ def run_once():
 
 RUN_MINUTES = {0, 30}
 MARKET_START_HOUR = 9
-MARKET_END_HOUR = 15
+MARKET_END_HOUR = 23
 MARKET_END_MINUTE = 30
 
 
@@ -392,7 +392,7 @@ def run_intraday_scheduler() -> None:
     평일 정규장 중 00분·30분마다 다시 실행한다.
     """
     print("30분 장중 분석기를 시작합니다.")
-    print("시작 즉시 한 번 실행한 뒤 09:00~15:30 동안 30분마다 실행합니다.")
+    print("시작 즉시 한 번 실행한 뒤 평일 09:00~23:30 동안 30분마다 실행합니다.")
     print("중지하려면 Ctrl+C를 누르세요.")
 
     now = datetime.now()
