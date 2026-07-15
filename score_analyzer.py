@@ -828,13 +828,7 @@ def make_score_sheet(
             "추격위험등급": risk_level,
             "추격위험사유": risk_reason,
             "점수변동사유": change_reason,
-            "뉴스평가상태": (
-                "평가완료"
-                if news_score != 0
-                else "평가대기"
-                if news_summary != "관련 뉴스 없음"
-                else "뉴스없음"
-            ),
+            "뉴스평가상태": news_info["뉴스평가상태"],
             "거래량점수": item["거래량점수"],
             "상승률점수": item["상승률점수"],
             "거래대금점수": item["거래대금점수"],
