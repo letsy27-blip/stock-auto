@@ -2406,12 +2406,6 @@ def show_market_home(
     chart_df: pd.DataFrame,
     master_df: pd.DataFrame,
 ):
-    show_realtime_recommendations(current_df)
-    st.divider()
-    show_market_overview()
-
-    st.divider()
-
     combined_df = pd.concat(
         [history_df, current_df],
         ignore_index=True,
@@ -2424,6 +2418,12 @@ def show_market_home(
         chart_df=chart_df,
         master_df=master_df,
     )
+
+    st.divider()
+    show_market_overview()
+
+    st.divider()
+    show_realtime_recommendations(current_df)
 
 
 def show_intraday_flow(snapshot_df: pd.DataFrame):
