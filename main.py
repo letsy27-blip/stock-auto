@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
-from database import save_all_data
+from database import save_all_data, save_intraday_snapshot
 from excel_writer import save_to_excel
 from kis_api import (
     collect_investor_trends,
@@ -305,6 +305,12 @@ def run_once():
         chart_history_df=chart_history_df,
         supply_demand_df=supply_demand_df,
         news_history_df=news_history_df,
+    )
+
+    snapshot_count, event_count = save_intraday_snapshot(scored_df)
+    print(
+        f"장중 스냅샷 저장: {snapshot_count}건"
+        f", TOP30 이벤트: {event_count}건"
     )
 
     save_to_excel(

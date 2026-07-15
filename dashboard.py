@@ -2886,8 +2886,7 @@ def main():
             update_datetime == latest_update
             ].copy()
 
-    # 현재 database.py에서는 intraday_snapshot을 따로 저장하지 않음
-    snapshot_df = pd.DataFrame()
+    snapshot_df = load_table("intraday_snapshot")
 
     chart_df = load_table("chart_history")
 
