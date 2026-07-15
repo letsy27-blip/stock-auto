@@ -1,6 +1,9 @@
+import json
+import os
 import threading
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -11,6 +14,7 @@ from config import APP_KEY, APP_SECRET, BASE_URL
 REQUEST_TIMEOUT = 20
 _TOKEN_CACHE: dict[str, float | str] = {"value": "", "expires_at": 0.0}
 _TOKEN_LOCK = threading.Lock()
+_TOKEN_CACHE_FILE = Path(__file__).resolve().with_name(".kis_token_cache.json")
 
 
 def _headers(token: str, tr_id: str) -> dict:
@@ -31,12 +35,44 @@ def _safe_int(value) -> int:
         return 0
 
 
+def _load_persisted_token() -> str | None:
+    """다른 로컬 프로세스가 받은 아직 유효한 토큰을 재사용한다."""
+    try:
+        data = json.loads(_TOKEN_CACHE_FILE.read_text(encoding="utf-8"))
+        token = str(data.get("value", ""))
+        expires_at = float(data.get("expires_at", 0))
+        if token and time.time() < expires_at:
+            _TOKEN_CACHE["value"] = token
+            _TOKEN_CACHE["expires_at"] = expires_at
+            return token
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _persist_token(token: str, expires_at: float) -> None:
+    """토큰은 Git에 올리지 않는 로컬 캐시에만 저장한다."""
+    try:
+        temporary = _TOKEN_CACHE_FILE.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps({"value": token, "expires_at": expires_at}),
+            encoding="utf-8",
+        )
+        os.replace(temporary, _TOKEN_CACHE_FILE)
+    except OSError:
+        pass
+
+
 def get_access_token():
     # KIS는 접근토큰 발급을 분당 1회로 제한한다. 대시보드의 반복 렌더링에서는
     # 이미 받은 토큰을 재사용해야 현재가·실시간 시세가 정상 동작한다.
     with _TOKEN_LOCK:
         if _TOKEN_CACHE["value"] and time.time() < _TOKEN_CACHE["expires_at"]:
             return str(_TOKEN_CACHE["value"])
+
+        persisted_token = _load_persisted_token()
+        if persisted_token:
+            return persisted_token
 
         url = f"{BASE_URL}/oauth2/tokenP"
         headers = {"content-type": "application/json"}
@@ -60,6 +96,7 @@ def get_access_token():
                 expires_in = int(data.get("expires_in", 24 * 60 * 60))
                 _TOKEN_CACHE["value"] = token
                 _TOKEN_CACHE["expires_at"] = time.time() + max(60, expires_in - 60)
+                _persist_token(token, float(_TOKEN_CACHE["expires_at"]))
             return token
         except Exception as exc:
             print("접근토큰 발급 실패:", exc)
