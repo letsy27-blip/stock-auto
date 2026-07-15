@@ -2413,7 +2413,8 @@ def show_realtime_recommendations(current_df: pd.DataFrame):
             value = "현재가 조회 대기"
             delta = "KIS 현재가 미수신"
 
-        columns[index].metric(f"{index + 1}. {name}", value, delta)
+        columns[index].markdown(f"### {index + 1}. {name}")
+        columns[index].metric("현재가", value, delta)
         recommendation = str(row.get("최종추천", "추천 검토"))
         columns[index].caption(
             f"{code} · 점수 {row[score_column]:.2f} · {recommendation}"
