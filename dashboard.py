@@ -146,73 +146,42 @@ st.markdown(
     }
 
     .hongstock-welcome-note {
-        position: relative;
-        overflow: hidden;
-        padding: 42px 46px 32px;
-        border: 1px solid #D7BE91;
-        border-radius: 4px;
-        color: #35291B;
-        background:
-            repeating-linear-gradient(
-                0deg,
-                rgba(132, 100, 50, 0.07) 0px,
-                rgba(132, 100, 50, 0.07) 1px,
-                transparent 1px,
-                transparent 32px
-            ),
-            linear-gradient(135deg, #FFFDF4 0%, #F4E2B8 100%);
-        box-shadow: 0 15px 34px rgba(69, 48, 16, 0.18);
-    }
-
-    .hongstock-welcome-note::before {
-        content: "";
-        position: absolute;
-        width: 130px;
-        height: 28px;
-        top: -12px;
-        left: calc(50% - 65px);
-        background: rgba(198, 168, 111, 0.48);
-        transform: rotate(-2deg);
+        padding: 18px 4px 8px;
+        color: #111827;
+        background: transparent;
     }
 
     .hongstock-welcome-meta {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        color: #896735;
-        font-family: Georgia, "Times New Roman", serif;
-        font-size: 12px;
-        font-weight: 800;
-        letter-spacing: 0.14em;
-        text-transform: uppercase;
+        margin-bottom: 26px;
+        color: #6B7280;
+        font-size: 14px;
+        font-weight: 600;
     }
 
     .hongstock-welcome-title {
-        margin: 25px 0 14px;
-        color: #302213;
-        font-family: Georgia, "Times New Roman", serif;
-        font-size: clamp(31px, 4vw, 49px);
+        margin: 0 0 18px;
+        color: #111827;
+        font-size: clamp(28px, 3.2vw, 42px);
         font-weight: 800;
-        line-height: 1.08;
+        line-height: 1.2;
         letter-spacing: -0.04em;
     }
 
     .hongstock-welcome-copy {
-        max-width: 680px;
-        margin: 0;
-        color: #59472D;
+        max-width: 780px;
+        margin: 0 0 12px;
+        color: #374151;
         font-size: 16px;
-        line-height: 1.8;
+        line-height: 1.85;
     }
 
     .hongstock-welcome-principles {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
         gap: 0;
-        margin-top: 30px;
-        border-top: 1px solid rgba(109, 79, 37, 0.35);
-        border-bottom: 1px solid rgba(109, 79, 37, 0.35);
+        margin-top: 28px;
+        border-top: 1px solid #E5E7EB;
+        border-bottom: 1px solid #E5E7EB;
     }
 
     .hongstock-welcome-principles > div {
@@ -220,14 +189,13 @@ st.markdown(
     }
 
     .hongstock-welcome-principles > div + div {
-        border-left: 1px solid rgba(109, 79, 37, 0.35);
+        border-left: 1px solid #E5E7EB;
     }
 
     .hongstock-welcome-principles em {
         display: block;
         margin-bottom: 9px;
-        color: #B05036;
-        font-family: Georgia, "Times New Roman", serif;
+        color: #6B7280;
         font-size: 13px;
         font-style: normal;
         font-weight: 800;
@@ -236,28 +204,25 @@ st.markdown(
     .hongstock-welcome-principles strong {
         display: block;
         margin-bottom: 5px;
-        color: #46321B;
+        color: #111827;
         font-size: 15px;
     }
 
     .hongstock-welcome-principles span {
-        color: #665035;
+        color: #4B5563;
         font-size: 13px;
         line-height: 1.5;
     }
 
     .hongstock-welcome-signature {
         margin-top: 22px;
-        color: #73562A;
-        font-family: Georgia, "Times New Roman", serif;
+        color: #4B5563;
         font-size: 14px;
-        font-weight: 700;
-        letter-spacing: 0.02em;
+        line-height: 1.65;
     }
 
     .hongstock-welcome-signature b {
-        color: #B05036;
-        font-size: 18px;
+        color: #111827;
     }
 
     @media (max-width: 700px) {
@@ -682,6 +647,33 @@ def apply_display_theme(theme: str) -> None:
         }
         [data-testid="stAppViewContainer"] hr {
             border-color: #374151;
+        }
+        div[data-testid="stDialog"] div[role="dialog"] {
+            background: #101317 !important;
+            color: #E5E7EB !important;
+            border: 1px solid #374151;
+        }
+        div[data-testid="stDialog"] .hongstock-welcome-note {
+            color: #E5E7EB;
+            background: transparent;
+        }
+        div[data-testid="stDialog"] .hongstock-welcome-meta,
+        div[data-testid="stDialog"] .hongstock-welcome-copy,
+        div[data-testid="stDialog"] .hongstock-welcome-principles span,
+        div[data-testid="stDialog"] .hongstock-welcome-signature {
+            color: #9CA3AF !important;
+        }
+        div[data-testid="stDialog"] .hongstock-welcome-title,
+        div[data-testid="stDialog"] .hongstock-welcome-principles strong,
+        div[data-testid="stDialog"] .hongstock-welcome-signature b {
+            color: #F9FAFB !important;
+        }
+        div[data-testid="stDialog"] .hongstock-welcome-principles,
+        div[data-testid="stDialog"] .hongstock-welcome-principles > div + div {
+            border-color: #374151;
+        }
+        div[data-testid="stDialog"] .hongstock-welcome-principles em {
+            color: #9CA3AF !important;
         }
         </style>
         """,
@@ -4505,18 +4497,22 @@ def show_hongstock_welcome() -> bool:
         st.markdown(
             """
             <section class="hongstock-welcome-note">
-                <div class="hongstock-welcome-meta"><span>Investment note · 01</span><span>HONG STOCK</span></div>
-                <h1 class="hongstock-welcome-title">종목보다 먼저,<br>“왜”를 남깁니다.</h1>
+                <div class="hongstock-welcome-meta">안녕하세요, HONG STOCK입니다.</div>
+                <h1 class="hongstock-welcome-title">추천의 이유를 기록하는<br>주식 분석 프로그램입니다.</h1>
                 <p class="hongstock-welcome-copy">
-                    예측은 언제든 빗나갈 수 있습니다. HONG STOCK은 그 순간을 숨기지 않습니다.<br>
-                    추천의 근거와 실제 결과를 나란히 기록해, 다음 판단이 더 단단해지도록 만듭니다.
+                    HONG STOCK은 단순히 종목을 보여주거나 매수를 권하는 프로그램이 아닙니다.
+                    가격, 거래량, 수급, 뉴스, 기술적 위치를 함께 살펴보고 왜 이 종목이 후보가 되었는지 보여줍니다.
+                </p>
+                <p class="hongstock-welcome-copy">
+                    이후 실제 주가가 어떻게 움직였는지도 다시 확인합니다. 예측이 맞았을 때는 어떤 근거가 유효했는지,
+                    예상과 달랐을 때는 무엇이 부족했는지 기록해 다음 분석을 개선하는 것이 HONG STOCK의 핵심입니다.
                 </p>
                 <div class="hongstock-welcome-principles">
-                    <div><em>01 / EVIDENCE</em><strong>근거를 먼저 봅니다</strong><span>가격·수급·뉴스·위험 신호를 함께 확인합니다.</span></div>
-                    <div><em>02 / REVIEW</em><strong>결과를 다시 봅니다</strong><span>추천 뒤 1·5·20일의 실제 흐름을 검증합니다.</span></div>
-                    <div><em>03 / LEARN</em><strong>이유를 남깁니다</strong><span>맞고 틀린 이유를 다음 판단의 재료로 쌓습니다.</span></div>
+                    <div><em>01</em><strong>근거 확인</strong><span>추천 점수와 함께 진입 조건·추격 위험을 확인합니다.</span></div>
+                    <div><em>02</em><strong>후보 구분</strong><span>매수 가능 후보와 관찰 후보를 분리해 보여줍니다.</span></div>
+                    <div><em>03</em><strong>결과 학습</strong><span>실제 결과와 이유를 DB에 남겨 분석을 누적 개선합니다.</span></div>
                 </div>
-                <div class="hongstock-welcome-signature"><b>HONG STOCK</b> · 기록이 쌓일수록, 판단은 더 선명해집니다.</div>
+                <div class="hongstock-welcome-signature"><b>HONG STOCK</b>은 투자 판단을 대신하지 않습니다. 더 나은 판단을 위해 근거와 결과를 정리하는 도구입니다.</div>
             </section>
             """,
             unsafe_allow_html=True,
@@ -4535,6 +4531,9 @@ def show_hongstock_welcome() -> bool:
 def main():
     st.title("HONG STOCK")
     st.caption("추천보다 이유를 기록하는 주식 분석")
+
+    # 시작 팝업도 이전에 선택한 화면 테마를 그대로 따른다.
+    apply_display_theme(st.session_state.get("dashboard_theme", "화이트"))
 
     if show_hongstock_welcome():
         return
