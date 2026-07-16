@@ -4532,12 +4532,6 @@ def main():
     st.title("HONG STOCK")
     st.caption("추천보다 이유를 기록하는 주식 분석")
 
-    # 시작 팝업도 이전에 선택한 화면 테마를 그대로 따른다.
-    apply_display_theme(st.session_state.get("dashboard_theme", "화이트"))
-
-    if show_hongstock_welcome():
-        return
-
     # 화면을 열어 둔 상태에서도 1분마다 새 DB를 확인한다.
     st_autorefresh(
         interval=DB_SYNC_INTERVAL_SECONDS * 1000,
