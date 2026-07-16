@@ -1985,7 +1985,10 @@ def make_stock_dialog(
     classification_df: pd.DataFrame,
     theme_history_df: pd.DataFrame,
 ):
-    @st.dialog("종목 상세 분석", width="large")
+    def close_stock_detail_dialog():
+        st.session_state["realtime_detail_dialog_open"] = False
+
+    @st.dialog("종목 상세 분석", width="large", on_dismiss=close_stock_detail_dialog)
     def stock_detail_popup(stock_name: str, stock_code: str):
         show_stock_detail_by_code(
             score_df=score_df,
@@ -2852,14 +2855,14 @@ def show_recommendation_mini_chart(
             ]
         )
 
-    if price:
+    if opening_price:
         figure.add_hline(
-            y=price,
-            line_color=price_color,
+            y=opening_price,
+            line_color="#94A3B8",
             line_width=2,
             line_dash="dot",
-            annotation_text=f"현재 {price:,.0f}원",
-            annotation_font_color=price_color,
+            annotation_text=f"시가 {opening_price:,.0f}원",
+            annotation_font_color="#94A3B8",
             annotation_position="top right",
         )
 
@@ -2996,7 +2999,8 @@ def show_realtime_recommendations(
             realtime_status = f"실시간 연결 재시도 중: {realtime['error']}"
         else:
             realtime_status = "KIS WebSocket 연결 중"
-        st_autorefresh(interval=1000, key="realtime_recommendation_refresh")
+        if not st.session_state.get("realtime_detail_dialog_open", False):
+            st_autorefresh(interval=1000, key="realtime_recommendation_refresh")
 
     # WebSocket은 체결가 중심이고 시가 정보가 없으므로, REST 현재가의 시가를
     # 함께 사용해 카드 차트의 빨강/파랑 기준을 정확히 표시한다.
@@ -3046,6 +3050,7 @@ def show_realtime_recommendations(
                 "관찰 후보입니다. 돌파 확인과 추격 위험 조건을 통과하기 전에는 매수하지 않습니다."
             )
         if columns[index].button("상세 분석 보기", key=f"realtime_detail_{code}"):
+            st.session_state["realtime_detail_dialog_open"] = True
             record_behavior_event(
                 "view",
                 code,
