@@ -2352,6 +2352,83 @@ def make_trading_trend_text(
 # -----------------------------
 
 
+def make_top30_paper_buy_dialog():
+    """TOP30 화면에서 바로 사용할 수 있는 모의 매수 확인창을 만든다."""
+
+    @st.dialog("모의 매수 확인", width="small")
+    def paper_buy_popup(stock_name: str, stock_code: str, fallback_price: float = 0.0):
+        code = clean_code(stock_code)
+        st.subheader(f"{stock_name} ({code})")
+        st.caption("실제 주문은 전송되지 않습니다. 매수 실행 직전에 현재가를 한 번 더 조회합니다.")
+
+        quote_price = 0.0
+        token = get_access_token()
+        if token:
+            try:
+                body = get_current_price(token, code)
+                quote_price = safe_float((body.get("output") or {}).get("stck_prpr", 0))
+            except Exception:
+                quote_price = 0.0
+
+        initial_price = quote_price or safe_float(fallback_price)
+        quantity = st.number_input(
+            "수량",
+            min_value=1,
+            value=1,
+            step=1,
+            key=f"top30_paper_buy_quantity_{code}",
+        )
+
+        if initial_price > 0:
+            st.metric("조회 현재가", f"{initial_price:,.0f}원")
+            st.caption("현재가가 바뀌면 실제 모의 체결가는 매수 실행 시점 가격으로 반영됩니다.")
+        else:
+            initial_price = st.number_input(
+                "현재가 미수신 · 체결 가격",
+                min_value=1.0,
+                value=1.0,
+                step=100.0,
+                key=f"top30_paper_buy_price_{code}",
+            )
+            st.caption("KIS 현재가를 받지 못했습니다. 입력한 가격으로 모의 체결합니다.")
+
+        st.metric("예상 주문금액", f"{quantity * initial_price:,.0f}원")
+        if st.button(
+            "이 가격으로 모의 매수",
+            key=f"top30_paper_buy_confirm_{code}",
+            type="primary",
+            use_container_width=True,
+        ):
+            execution_price = initial_price
+            if token:
+                try:
+                    body = get_current_price(token, code)
+                    latest_price = safe_float((body.get("output") or {}).get("stck_prpr", 0))
+                    if latest_price > 0:
+                        execution_price = latest_price
+                except Exception:
+                    pass
+            try:
+                result = place_paper_order(
+                    "BUY",
+                    code,
+                    stock_name,
+                    int(quantity),
+                    execution_price,
+                )
+                st.session_state["top30_paper_order_confirmation"] = (
+                    f"{stock_name} {int(quantity):,}주를 {execution_price:,.0f}원에 모의 매수했습니다. "
+                    f"체결금액 {result['amount']:,.0f}원"
+                )
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"모의 매수 처리 중 오류가 발생했습니다: {exc}")
+
+    return paper_buy_popup
+
+
 
 def show_today_top(
     score_df: pd.DataFrame,
@@ -2367,6 +2444,9 @@ def show_today_top(
     ].copy()
 
     st.subheader(f"{selected_date} 추천점수 TOP30")
+    order_confirmation = st.session_state.pop("top30_paper_order_confirmation", None)
+    if order_confirmation:
+        st.success(order_confirmation)
 
     filter_col, recommendation_col = st.columns(2)
     sort_option = filter_col.selectbox(
@@ -2429,6 +2509,7 @@ def show_today_top(
         supply_df=supply_df,
         news_df=news_df,
     )
+    paper_buy_popup = make_top30_paper_buy_dialog()
 
     # 추천 사유와 상세 버튼을 제거하고 종목명 영역을 넓힘
     widths = [
@@ -2441,6 +2522,7 @@ def show_today_top(
         0.85,  # 최종
         1.2,   # 추격 위험
         1.0,   # 추천
+        1.25,  # 모의 매수
     ]
 
     headers = [
@@ -2453,6 +2535,7 @@ def show_today_top(
         "최종",
         "추격 위험",
         "추천",
+        "모의투자",
     ]
 
     header_cols = st.columns(widths)
@@ -2563,6 +2646,19 @@ def show_today_top(
             ),
             unsafe_allow_html=True,
         )
+
+        fallback_price = 0.0
+        for price_column in ("현재가", "종가", "기준종가"):
+            if price_column in row.index:
+                fallback_price = safe_float(row.get(price_column, 0))
+                if fallback_price > 0:
+                    break
+        if cols[9].button(
+            "모의 매수",
+            key=f"top30_paper_buy_{selected_date}_{code}",
+            use_container_width=True,
+        ):
+            paper_buy_popup(name, code, fallback_price)
 
 def show_stock_search(
     score_df: pd.DataFrame,
