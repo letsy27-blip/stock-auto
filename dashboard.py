@@ -129,7 +129,7 @@ def sync_database_from_github() -> None:
         # 네트워크 문제여도 기존 DB로 대시보드는 계속 표시한다.
         st.session_state["db_sync_message"] = f"DB 동기화 보류: {exc}"
 
-st.set_page_config(page_title="홍스탁 | 이유를 기록하는 주식 분석", layout="wide")
+st.set_page_config(page_title="HONGSTOCK | 이유를 기록하는 주식 분석", layout="wide")
 
 st.markdown(
     """
@@ -4379,21 +4379,21 @@ def show_hongstock_welcome() -> bool:
     def dismiss_welcome():
         st.session_state["hongstock_welcome_seen"] = True
 
-    @st.dialog("홍스탁에 오신 것을 환영합니다", width="large", on_dismiss=dismiss_welcome)
+    @st.dialog("HONGSTOCK에 오신 것을 환영합니다", width="large", on_dismiss=dismiss_welcome)
     def welcome_dialog():
-        st.markdown("## 홍스탁은 종목을 찍지 않습니다.")
+        st.markdown("## HONGSTOCK은 종목을 찍지 않습니다.")
         st.markdown(
-            "주식에서 모든 예측이 맞을 수는 없습니다. 그래서 홍스탁은 "
+            "주식에서 모든 예측이 맞을 수는 없습니다. 그래서 HONGSTOCK은 "
             "**무엇을 추천했는지보다 왜 그렇게 판단했는지**를 먼저 남깁니다."
         )
         left, right = st.columns(2)
         with left:
-            st.markdown("### 왜 홍스탁인가요?")
+            st.markdown("### 왜 HONGSTOCK인가요?")
             st.markdown("- 추천 근거를 숨기지 않습니다\n- 틀린 결과도 버리지 않고 기록합니다\n- 충동적인 진입 대신 판단 과정을 남깁니다")
         with right:
-            st.markdown("### 홍스탁의 약속")
+            st.markdown("### HONGSTOCK의 약속")
             st.markdown("- 매수 가능 후보와 관찰 후보를 구분\n- 추격 위험과 돌파 확인 여부를 함께 표시\n- 결과는 1·5·20일 뒤 다시 검증")
-        st.info("데이터 → 근거 있는 판단 → 실제 결과 검증 → 이유 기록 → 누적 개선. 한 번의 성공이나 실패가 아니라, 이 과정이 홍스탁의 핵심입니다.")
+        st.info("데이터 → 근거 있는 판단 → 실제 결과 검증 → 이유 기록 → 누적 개선. 한 번의 성공이나 실패가 아니라, 이 과정이 HONGSTOCK의 핵심입니다.")
         st.caption("투자 판단의 보조 정보와 모의투자 도구입니다. 실제 투자 손익의 책임은 사용자에게 있습니다.")
         if st.button("근거부터 확인하기", type="primary", use_container_width=True):
             st.session_state["hongstock_welcome_seen"] = True
@@ -4406,7 +4406,7 @@ def show_hongstock_welcome() -> bool:
 # 메인
 # -----------------------------
 def main():
-    st.title("홍스탁")
+    st.title("HONGSTOCK")
     st.caption("추천보다 이유를 기록하는 주식 분석")
 
     if show_hongstock_welcome():
