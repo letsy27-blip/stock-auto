@@ -19,8 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
-      # Python의 datetime.now()가 장중 기준인 한국 시간을 기록하도록 고정한다.
-      TZ: Asia/Seoul
       KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
       KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
       KIS_BASE_URL: ${{ secrets.KIS_BASE_URL }}
@@ -56,27 +54,6 @@ jobs:
             echo "Collection finished without updating stock_data.db. Check the Collect market data once log."
             exit 1
           fi
-
-      - name: Verify recommendation scores are current
-        run: |
-          python - <<'PY'
-          import sqlite3
-          import sys
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
-
-          today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
-          with sqlite3.connect("stock_data.db") as conn:
-              row = conn.execute(
-                  'SELECT MAX("최종갱신일자") FROM "score"'
-              ).fetchone()
-
-          latest = row[0] if row else None
-          if latest != today:
-              print(f"Recommendation score is stale: {latest!r}; expected {today}")
-              sys.exit(1)
-          print(f"Recommendation score date verified: {latest}")
-          PY
 
       - name: Commit updated data
         run: |

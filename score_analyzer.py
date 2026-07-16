@@ -171,6 +171,7 @@ def _calc_technical_metrics(
 ) -> dict[str, Any]:
     default = {
         "시장기준일": "",
+        "1일수익률": 0.0,
         "5일수익률": 0.0,
         "20일수익률": 0.0,
         "60일수익률": 0.0,
@@ -229,6 +230,8 @@ def _calc_technical_metrics(
     volume = df["거래량"].astype(float)
 
     current_price = float(close.iloc[-1])
+    previous_price = float(close.iloc[-2]) if len(close) >= 2 else current_price
+    r1 = ((current_price / previous_price) - 1) * 100 if previous_price else 0.0
     price_20 = float(close.iloc[-20]) if len(close) >= 20 else float(close.iloc[0])
     price_60 = float(close.iloc[-60]) if len(close) >= 60 else float(close.iloc[0])
 
@@ -311,6 +314,7 @@ def _calc_technical_metrics(
 
     return {
         "시장기준일": _latest_market_date(df),
+        "1일수익률": round(r1, 2),
         "5일수익률": round(r5, 2),
         "20일수익률": round(r20, 2),
         "60일수익률": round(r60, 2),
@@ -617,10 +621,24 @@ def _calc_chase_risk(metrics: dict[str, Any]) -> tuple[int, str, str]:
     """점수와 별개로 급등 추격·변동성 위험을 0~100으로 계산한다."""
     score = 0
     reasons: list[str] = []
+    r1 = _safe_float(metrics.get("1일수익률"))
     r5 = _safe_float(metrics.get("5일수익률"))
     volatility = _safe_float(metrics.get("20일변동성"))
     volume_rate = _safe_float(metrics.get("거래량증가율"))
     rsi = _safe_float(metrics.get("RSI"), 50.0)
+
+    if r1 >= 20:
+        score += 45
+        reasons.append(f"당일 {r1:.1f}% 급등")
+    elif r1 >= 15:
+        score += 35
+        reasons.append(f"당일 {r1:.1f}% 급등")
+    elif r1 >= 10:
+        score += 25
+        reasons.append(f"당일 {r1:.1f}% 상승")
+    elif r1 >= 7:
+        score += 15
+        reasons.append(f"당일 {r1:.1f}% 상승")
 
     if r5 >= 20:
         score += 30
@@ -758,6 +776,30 @@ def make_score_sheet(
         news_info = _news_lookup(news_summary_df, code)
         chase_risk, risk_level, risk_reason = _calc_chase_risk(metrics)
 
+        # 급등주를 단순 순위 점수만으로 매수 후보로 올리지 않는다. 특히 거래량이
+        # 확인되지 않은 돌파 관찰 구간은 되밀림 위험이 크므로 점수를 강하게 제한한다.
+        entry_penalty = 0.0
+        entry_penalty_reasons: list[str] = []
+        daily_return = _safe_float(metrics["1일수익률"])
+        volatility = _safe_float(metrics["20일변동성"])
+        confidence = _safe_float(metrics["돌파신뢰도"])
+        entry_judgement = str(metrics["진입판단"])
+        if daily_return >= 15 and confidence < 60:
+            entry_penalty -= 20.0
+            entry_penalty_reasons.append(f"당일 {daily_return:.1f}% 급등 후 돌파 확인 부족")
+        elif daily_return >= 10 and confidence < 60:
+            entry_penalty -= 12.0
+            entry_penalty_reasons.append(f"당일 {daily_return:.1f}% 상승 후 돌파 확인 부족")
+        if volatility >= 10:
+            entry_penalty -= 10.0
+            entry_penalty_reasons.append(f"20일 변동성 {volatility:.1f}%")
+        elif volatility >= 7 and confidence < 60:
+            entry_penalty -= 5.0
+            entry_penalty_reasons.append(f"20일 변동성 {volatility:.1f}%")
+        if entry_judgement == "돌파 관찰":
+            entry_penalty -= 8.0
+            entry_penalty_reasons.append("거래량 미확인 돌파 관찰")
+
         r20_score = _return_score(metrics["20일수익률"], 10.0)
         r60_score = _return_score(metrics["60일수익률"], 10.0)
         volume_increase_score = _volume_increase_score(metrics["거래량증가율"], 10.0)
@@ -813,7 +855,11 @@ def make_score_sheet(
 
         final_score = round(
             _clip(
-                market_score + supply_score + news_score + metrics["진입타이밍점수"],
+                market_score
+                + supply_score
+                + news_score
+                + metrics["진입타이밍점수"]
+                + entry_penalty,
                 FINAL_SCORE_MIN,
                 FINAL_SCORE_MAX,
             ),
@@ -882,6 +928,8 @@ def make_score_sheet(
             "진입판단": metrics["진입판단"],
             "진입판단사유": metrics["진입판단사유"],
             "진입타이밍점수": metrics["진입타이밍점수"],
+            "진입위험감점": entry_penalty,
+            "진입위험사유": " · ".join(entry_penalty_reasons),
             "최근지지선": metrics["최근지지선"],
             "최근저항선": metrics["최근저항선"],
             "손절기준": metrics["손절기준"],
@@ -896,6 +944,7 @@ def make_score_sheet(
             "상승률점수": item["상승률점수"],
             "거래대금점수": item["거래대금점수"],
             "5일수익률(%)": metrics["5일수익률"],
+            "1일수익률(%)": metrics["1일수익률"],
             "20일수익률(%)": metrics["20일수익률"],
             "20일수익률점수": r20_score,
             "60일수익률(%)": metrics["60일수익률"],

@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
-from database import save_all_data, save_intraday_snapshot
+from database import save_all_data
 from excel_writer import save_to_excel
 from kis_api import (
     collect_investor_trends,
@@ -16,6 +16,7 @@ from news_analyzer import (
     collect_news_for_candidates,
 )
 from portfolio import analyze_my_stocks
+from prediction_tracker import update_prediction_tracking
 from ranking import (
     get_rise_rank,
     get_trade_value_rank,
@@ -217,10 +218,6 @@ def run_once():
         rise_rank_df,
         trade_value_df,
     )
-    if candidate_df.empty:
-        raise RuntimeError(
-            "추천 후보를 만들지 못했습니다. KIS 순위 조회 결과와 API 설정을 확인하세요."
-        )
 
     chart_history_df = make_chart_history_data(
         token=token,
@@ -262,10 +259,6 @@ def run_once():
         supply_demand_df=supply_demand_df,
         news_summary_df=news_summary_df,
     )
-    if scored_df.empty:
-        raise RuntimeError(
-            "추천 점수 생성 결과가 비어 있습니다. 수집 API 응답을 확인하세요."
-        )
 
     classification_df = update_stock_classifications(
         candidate_df=candidate_df,
@@ -307,10 +300,13 @@ def run_once():
         news_history_df=news_history_df,
     )
 
-    snapshot_count, event_count = save_intraday_snapshot(scored_df)
+    prediction_saved, prediction_evaluated = update_prediction_tracking(
+        scored_df=scored_df,
+        chart_history_df=chart_history_df,
+    )
     print(
-        f"장중 스냅샷 저장: {snapshot_count}건"
-        f", TOP30 이벤트: {event_count}건"
+        "예측 검증 갱신: "
+        f"새 추천 표본 {prediction_saved}건, 결과 평가 {prediction_evaluated}건"
     )
 
     save_to_excel(

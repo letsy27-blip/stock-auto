@@ -3,6 +3,7 @@ import re
 import json
 import sqlite3
 from datetime import date, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from urllib.parse import quote
@@ -17,10 +18,22 @@ from ai.gemini_client import DEFAULT_MODEL, stream_chat
 from kis_api import get_access_token, get_current_price
 from market_data import get_market_overview
 from realtime_quotes import get_realtime_quote_hub
+from paper_trading import (
+    get_account as get_paper_account,
+    get_orders as get_paper_orders,
+    get_positions as get_paper_positions,
+    place_order as place_paper_order,
+    reset_account as reset_paper_account,
+)
+from prediction_tracker import get_prediction_summary
 from sector_theme_strength import (
     make_industry_strength,
     make_theme_strength,
 )
+
+
+# 다크 모드에서 캔버스형 dataframe을 HTML 표로 대체할 때 원본 함수를 보관한다.
+_NATIVE_DATAFRAME = st.dataframe
 
 DB_PATH = Path(__file__).resolve().with_name("stock_data.db")
 DB_NAME = str(DB_PATH)
@@ -68,6 +81,21 @@ def sync_database_from_github() -> None:
 
         if remote_etag and remote_etag == st.session_state.get("db_sync_etag"):
             return
+
+        # 로컬 수집기(main.py)가 방금 저장한 DB를 오래된 GitHub 사본으로
+        # 덮어쓰면 예측 검증 기록과 최신 수집 결과가 사라질 수 있다.
+        remote_modified_text = head.headers.get("Last-Modified")
+        if remote_modified_text and DB_PATH.exists():
+            try:
+                remote_modified = parsedate_to_datetime(remote_modified_text).timestamp()
+                local_modified = DB_PATH.stat().st_mtime
+                if local_modified >= remote_modified:
+                    st.session_state["db_sync_etag"] = remote_etag
+                    st.session_state["db_sync_message"] = "로컬 최신 DB 유지"
+                    return
+            except (TypeError, ValueError, OSError):
+                # 헤더 해석에 실패하면 기존 방식대로 GitHub DB를 검증해 반영한다.
+                pass
 
         response = requests.get(
             REMOTE_DB_URL,
@@ -260,14 +288,281 @@ st.markdown(
 # -----------------------------
 # 공통 유틸
 # -----------------------------
-def load_table(table_name: str) -> pd.DataFrame:
+def _database_version() -> int:
+    """DB가 교체되면 캐시를 자동으로 무효화할 수 있는 파일 버전값."""
+    try:
+        return DB_PATH.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _load_table_cached(table_name: str, database_version: int) -> pd.DataFrame:
     conn = sqlite3.connect(DB_NAME)
     try:
         df = pd.read_sql(f'SELECT * FROM "{table_name}"', conn)
     except Exception:
         df = pd.DataFrame()
-    conn.close()
+    finally:
+        conn.close()
     return df
+
+
+def load_table(table_name: str) -> pd.DataFrame:
+    """30초 동안 같은 DB 읽기를 재사용하고, DB 변경 시 즉시 다시 읽는다."""
+    return _load_table_cached(table_name, _database_version())
+
+
+def show_theme_aware_table(dataframe: pd.DataFrame, *args, **kwargs) -> None:
+    """캔버스 데이터그리드 색상 문제를 피해 다크 테마에서도 표를 선명하게 표시한다."""
+    if st.session_state.get("dashboard_theme", "화이트") != "다크":
+        _NATIVE_DATAFRAME(dataframe, *args, **kwargs)
+        return
+
+    table = dataframe if isinstance(dataframe, pd.DataFrame) else pd.DataFrame(dataframe)
+    table_html = table.to_html(index=False, escape=True, classes="theme-aware-table")
+    st.markdown(
+        f"<div class='theme-aware-table-wrap'>{table_html}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def format_paper_positions_for_display(positions: pd.DataFrame) -> pd.DataFrame:
+    """모의 보유종목의 금액·수익률을 읽기 쉬운 표기법으로 바꾼다."""
+    display = positions.rename(
+        columns={
+            "stock_code": "종목코드",
+            "stock_name": "종목명",
+            "quantity": "수량",
+            "average_price": "평균단가",
+        }
+    )
+    columns = ["종목코드", "종목명", "수량", "평균단가", "현재가", "평가금액", "평가손익", "수익률(%)"]
+    display = display[columns].copy()
+    display["수량"] = display["수량"].map(lambda value: f"{safe_float(value):,.0f}")
+    display["평균단가"] = display["평균단가"].map(lambda value: f"{safe_float(value):,.2f}원")
+    display["현재가"] = display["현재가"].map(lambda value: f"{safe_float(value):,.0f}원")
+    display["평가금액"] = display["평가금액"].map(lambda value: f"{safe_float(value):,.0f}원")
+    display["평가손익"] = display["평가손익"].map(lambda value: f"{safe_float(value):+,.0f}원")
+    display["수익률(%)"] = display["수익률(%)"].map(lambda value: f"{safe_float(value):+.2f}%")
+    return display
+
+
+def apply_display_theme(theme: str) -> None:
+    """화이트/다크 화면에서 배경과 글자 대비를 함께 맞춘다."""
+    if theme != "다크":
+        return
+
+    st.markdown(
+        """
+        <style>
+        [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
+            background: #101317;
+            color: #E5E7EB;
+        }
+        [data-testid="stSidebar"] {
+            background: #171B21;
+        }
+        [data-testid="stSidebar"] .stButton > button,
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] p {
+            color: #E5E7EB !important;
+        }
+        [data-testid="stSidebar"] .stButton > button:hover,
+        [data-testid="stSidebar"] .stButton > button[kind="primary"] {
+            background: #263B55 !important;
+            color: #FFFFFF !important;
+        }
+        [data-testid="stAppViewContainer"] h1,
+        [data-testid="stAppViewContainer"] h2,
+        [data-testid="stAppViewContainer"] h3,
+        [data-testid="stAppViewContainer"] p,
+        [data-testid="stAppViewContainer"] label,
+        [data-testid="stMetricLabel"],
+        [data-testid="stMetricValue"],
+        .normal-text, .stock-name-text, .reason-text,
+        .metric-label, .metric-value, .stock-grade {
+            color: #E5E7EB !important;
+        }
+        [data-testid="stDataFrame"],
+        [data-testid="stDataFrame"] * {
+            background-color: #171B21 !important;
+            color: #E5E7EB !important;
+        }
+        /* st.dataframe은 Glide Data Grid 캔버스라 전용 색상 변수가 필요하다. */
+        [data-testid="stDataFrame"] {
+            --gdg-bg-cell: #171B21;
+            --gdg-bg-cell-medium: #1D232C;
+            --gdg-bg-header: #202833;
+            --gdg-bg-header-has-focus: #263B55;
+            --gdg-bg-header-hovered: #2C3E54;
+            --gdg-text-dark: #F3F4F6;
+            --gdg-text-medium: #D1D5DB;
+            --gdg-text-light: #9CA3AF;
+            --gdg-text-header: #F9FAFB;
+            --gdg-border-color: #374151;
+            --gdg-horizontal-border-color: #2B3440;
+            --gdg-accent-color: #60A5FA;
+            --gdg-accent-light: #263B55;
+            --gdg-bg-bubble: #263B55;
+            --gdg-bg-bubble-selected: #34557A;
+        }
+        [data-testid="stTable"] table,
+        [data-testid="stTable"] th,
+        [data-testid="stTable"] td,
+        [data-testid="stTable"] tr {
+            background: #171B21 !important;
+            color: #E5E7EB !important;
+            border-color: #374151 !important;
+        }
+        .theme-aware-table-wrap {
+            overflow-x: auto;
+            border: 1px solid #374151;
+            border-radius: 8px;
+        }
+        .theme-aware-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #171B21;
+            color: #E5E7EB;
+        }
+        .theme-aware-table th {
+            background: #202833;
+            color: #F9FAFB;
+            font-weight: 700;
+        }
+        .theme-aware-table th, .theme-aware-table td {
+            padding: 9px 11px;
+            border-bottom: 1px solid #374151;
+            text-align: left;
+            white-space: nowrap;
+        }
+        .theme-aware-table tr:hover td {
+            background: #202833;
+        }
+        [data-baseweb="popover"],
+        [data-baseweb="popover"] [role="listbox"],
+        [data-baseweb="popover"] [role="option"],
+        [data-baseweb="menu"] {
+            background: #171B21 !important;
+            color: #E5E7EB !important;
+        }
+        [data-baseweb="popover"] [role="option"]:hover,
+        [data-baseweb="popover"] [aria-selected="true"] {
+            background: #263B55 !important;
+            color: #FFFFFF !important;
+        }
+        [data-testid="stAlert"],
+        [data-testid="stAlert"] * {
+            color: #E5E7EB;
+        }
+        [data-testid="stExpander"],
+        [data-testid="stExpander"] details,
+        [data-testid="stTabs"] button,
+        [data-testid="stVerticalBlockBorderWrapper"] {
+            background: #171B21 !important;
+            color: #E5E7EB !important;
+            border-color: #374151 !important;
+        }
+        [data-testid="stAppViewContainer"] input,
+        [data-testid="stAppViewContainer"] textarea,
+        [data-testid="stAppViewContainer"] [data-baseweb="select"] > div {
+            background: #171B21 !important;
+            color: #E5E7EB !important;
+            border-color: #4B5563 !important;
+        }
+        [data-testid="stSelectbox"] [data-baseweb="select"],
+        [data-testid="stSelectbox"] [data-baseweb="select"] > div,
+        [data-testid="stSelectbox"] [data-baseweb="select"] span,
+        [data-testid="stSelectbox"] svg {
+            background: #171B21 !important;
+            color: #E5E7EB !important;
+            fill: #E5E7EB !important;
+        }
+        [data-testid="stSelectbox"] [data-baseweb="select"] *,
+        [data-testid="stSelectbox"] [data-baseweb="select"] > div > div,
+        [data-testid="stNumberInput"] [data-baseweb="base-input"],
+        [data-testid="stNumberInput"] [data-baseweb="base-input"] > div,
+        [data-testid="stNumberInput"] button {
+            background: #171B21 !important;
+            color: #E5E7EB !important;
+            border-color: #4B5563 !important;
+        }
+        [role="listbox"], [role="listbox"] *,
+        [data-baseweb="popover"] > div,
+        [data-baseweb="popover"] > div > div {
+            background: #171B21 !important;
+            color: #E5E7EB !important;
+            border-color: #4B5563 !important;
+        }
+        [data-testid="stChatInput"],
+        [data-testid="stChatInput"] > div,
+        [data-testid="stChatInput"] [data-baseweb="input"],
+        [data-testid="stChatInput"] [data-baseweb="base-input"],
+        [data-testid="stChatInput"] [data-baseweb="input"] > div {
+            background: #171B21 !important;
+            border-color: #4B5563 !important;
+            color: #E5E7EB !important;
+        }
+        [data-testid="stChatInput"] textarea,
+        [data-testid="stChatInput"] textarea::placeholder {
+            background: #171B21 !important;
+            color: #9CA3AF !important;
+        }
+        [data-testid="stChatInput"] button {
+            background: #263B55 !important;
+            color: #E5E7EB !important;
+            border-color: #4B5563 !important;
+        }
+        [data-testid="stChatMessage"],
+        [data-testid="stChatMessage"] > div {
+            background: #171B21 !important;
+            color: #E5E7EB !important;
+        }
+        /* Streamlit 채팅 입력창은 하단 고정 컨테이너를 별도로 그린다. */
+        [data-testid="stBottomBlockContainer"],
+        [data-testid="stBottomBlockContainer"] > div,
+        [data-testid="stBottomBlockContainer"] [data-testid="stVerticalBlock"],
+        [data-testid="stBottomBlockContainer"] [data-testid="stElementContainer"] {
+            background: #101317 !important;
+        }
+        [data-testid="stBottomBlockContainer"]::before,
+        [data-testid="stBottomBlockContainer"]::after {
+            background: #101317 !important;
+        }
+        [class*="st-key-paper_buy_button"] button {
+            background: #DC2626 !important;
+            color: #FFFFFF !important;
+            border-color: #DC2626 !important;
+        }
+        [class*="st-key-paper_sell_button"] button {
+            background: #2563EB !important;
+            color: #FFFFFF !important;
+            border-color: #2563EB !important;
+        }
+        [class*="st-key-paper_buy_button"] button:disabled,
+        [class*="st-key-paper_sell_button"] button:disabled {
+            opacity: 0.45;
+            color: #E5E7EB !important;
+        }
+        [class*="st-key-realtime_detail_"] button {
+            background: #202833 !important;
+            color: #E5E7EB !important;
+            border-color: #4B5563 !important;
+        }
+        [class*="st-key-realtime_detail_"] button:hover {
+            background: #263B55 !important;
+            border-color: #60A5FA !important;
+            color: #FFFFFF !important;
+        }
+        [data-testid="stAppViewContainer"] hr {
+            border-color: #374151;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 # -----------------------------
 # DB 상태 검사
 # -----------------------------
@@ -1552,7 +1847,7 @@ def show_stock_detail_by_code(
 
     st.divider()
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         metric_card(
             "최종점수",
@@ -1952,12 +2247,54 @@ def show_today_top(
         score_df["저장일자"] == selected_date
     ].copy()
 
-    today_df = today_df.sort_values(
-        ["최종점수", "시장점수"],
-        ascending=False,
+    st.subheader(f"{selected_date} 추천점수 TOP30")
+
+    filter_col, recommendation_col = st.columns(2)
+    sort_option = filter_col.selectbox(
+        "정렬 기준",
+        [
+            "최종점수 높은순",
+            "시장점수 높은순",
+            "기관 순매수 높은순",
+            "기관 순매도 높은순",
+            "외국인 순매수 높은순",
+            "외국인 순매도 높은순",
+            "뉴스점수 높은순",
+            "추격위험 낮은순",
+        ],
+        key=f"top30_sort_{selected_date}",
+    )
+    recommendation_filter = recommendation_col.selectbox(
+        "추천 구분",
+        ["전체", "강력관심", "관심", "관찰", "약세", "제외"],
+        key=f"top30_recommendation_{selected_date}",
     )
 
-    st.subheader(f"{selected_date} 추천점수 TOP30")
+    if recommendation_filter != "전체" and "최종추천" in today_df.columns:
+        today_df = today_df[today_df["최종추천"] == recommendation_filter].copy()
+
+    sort_rules = {
+        "최종점수 높은순": ("최종점수", False),
+        "시장점수 높은순": ("시장점수", False),
+        "기관 순매수 높은순": ("기관순매수량", False),
+        "기관 순매도 높은순": ("기관순매수량", True),
+        "외국인 순매수 높은순": ("외국인순매수량", False),
+        "외국인 순매도 높은순": ("외국인순매수량", True),
+        "뉴스점수 높은순": ("뉴스점수", False),
+        "추격위험 낮은순": ("추격위험도", True),
+    }
+    sort_column, ascending = sort_rules[sort_option]
+    if sort_column in today_df.columns:
+        today_df[sort_column] = pd.to_numeric(
+            today_df[sort_column], errors="coerce"
+        ).fillna(0)
+        today_df = today_df.sort_values(
+            [sort_column, "최종점수"],
+            ascending=[ascending, False],
+        )
+    else:
+        st.info(f"{sort_option}에 필요한 데이터가 아직 없습니다. 최종점수순으로 표시합니다.")
+        today_df = today_df.sort_values(["최종점수", "시장점수"], ascending=False)
 
     detail_popup = make_stock_dialog(
         score_df=score_df,
@@ -2301,9 +2638,33 @@ def show_market_overview():
         for error in errors:
             st.warning(error)
 
-    if st.button("시장 현황 새로고침"):
-        load_market_overview_cached.clear()
-        st.rerun()
+def show_prediction_performance_summary():
+    """메인 화면에서 5거래일 기준 추천 성과를 간단히 보여준다."""
+    st.subheader("예측 검증 성과")
+    summary = get_prediction_summary()
+
+    success_rate = summary["success_rate"]
+    average_return = summary["average_return"]
+    columns = st.columns(4)
+    columns[0].metric(
+        "예측 성공률",
+        f"{success_rate:.1f}%" if success_rate is not None else "집계 대기",
+        "추천 후 5거래일 상승 기준" if success_rate is not None else None,
+    )
+    columns[1].metric(
+        "검증 완료",
+        f"{summary['completed']:,}건",
+        f"전체 표본 {summary['total']:,}건",
+    )
+    columns[2].metric("검증 대기", f"{summary['waiting']:,}건")
+    columns[3].metric(
+        "평균 5일 수익률",
+        f"{average_return:+.2f}%" if average_return is not None else "집계 대기",
+    )
+    st.caption(
+        "관심·관찰 추천을 하루 한 번 기록하고, 추천 다음 5거래일 종가가 "
+        "추천 시점 종가보다 높으면 성공으로 집계합니다. 표본이 쌓일수록 신뢰도가 높아집니다."
+    )
 
 
 
@@ -2422,6 +2783,39 @@ def load_recommendation_quotes(stock_codes: tuple[str, ...]) -> dict[str, dict]:
     return quotes
 
 
+@st.fragment(run_every="1s")
+def show_paper_order_live_price(stock_code: str, fallback_price: float = 0.0):
+    """주문 화면 전체를 다시 실행하지 않고 선택 종목의 현재가만 갱신한다."""
+    code = clean_code(stock_code)
+    hub = get_realtime_quote_hub()
+    hub.ensure_codes((code,), source="paper_order")
+    realtime = hub.snapshot((code,))
+    quote = realtime["quotes"].get(code, {})
+    price = safe_float(quote.get("price", 0)) or safe_float(fallback_price)
+    change = safe_float(quote.get("change", 0))
+    change_rate = safe_float(quote.get("change_rate", 0))
+
+    if price > 0:
+        live_quotes = dict(st.session_state.get("paper_order_live_quotes", {}))
+        live_quotes[code] = {
+            "price": price,
+            "change": change,
+            "change_rate": change_rate,
+        }
+        st.session_state["paper_order_live_quotes"] = live_quotes
+        st.metric(
+            "실시간 현재가",
+            f"{price:,.0f}원",
+            f"{change:+,.0f}원 ({change_rate:+.2f}%)",
+        )
+        st.caption("KIS WebSocket 실시간 체결가")
+    elif realtime["error"]:
+        st.metric("실시간 현재가", "연결 재시도 중")
+        st.caption("체결 시에는 KIS 현재가를 다시 조회합니다.")
+    else:
+        st.metric("실시간 현재가", "연결 중")
+
+
 def show_realtime_recommendations(
     current_df: pd.DataFrame,
     score_df: pd.DataFrame,
@@ -2431,7 +2825,8 @@ def show_realtime_recommendations(
     classification_df: pd.DataFrame,
     theme_history_df: pd.DataFrame,
 ):
-    st.header("실시간 추천 TOP 3")
+    st.header("현재 매수 판단")
+    st.caption("전일 장 준비와 별개로, 현재 점수·돌파 확인·추격위험을 다시 계산한 결과입니다.")
 
     if current_df.empty:
         st.info("추천 점수 데이터가 아직 없습니다.")
@@ -2446,7 +2841,28 @@ def show_realtime_recommendations(
     df[score_column] = pd.to_numeric(df[score_column], errors="coerce").fillna(0)
     # 테마·급등주도 후보에서 배제하지 않는다. 대신 상세 근거와 위험 판정을
     # 같이 보여줘 사용자가 모멘텀 매매 후보인지, 실제 매수 추천인지 구분한다.
-    top3 = df.sort_values(score_column, ascending=False).head(3).copy()
+    for column, default in [("돌파신뢰도", 0), ("추격위험도", 100)]:
+        if column not in df.columns:
+            df[column] = default
+        df[column] = pd.to_numeric(df[column], errors="coerce").fillna(default)
+
+    # 점수만 높다고 매수 후보가 되는 것은 아니다. 돌파가 확인되지 않았거나
+    # 급등 추격 위험이 큰 종목은 관찰 후보로만 분리한다.
+    recommendation = df.get("최종추천", pd.Series("", index=df.index)).astype(str)
+    entry = df.get("진입판단", pd.Series("", index=df.index)).astype(str)
+    buy_mask = (
+        recommendation.isin(["강력관심", "관심"])
+        & entry.isin(["돌파 확인", "지지선 근처"])
+        & (df["돌파신뢰도"] >= 60)
+        & (df["추격위험도"] < 45)
+    )
+    top3 = df.loc[buy_mask].sort_values(score_column, ascending=False).head(3).copy()
+    watch3 = df.loc[~buy_mask].sort_values(score_column, ascending=False).head(3).copy()
+    has_buyable_top3 = not top3.empty
+    if not has_buyable_top3:
+        # 빈 카드 영역 대신 관찰 후보를 명확히 표시한다. 이 경우에도 매수 추천으로
+        # 오해되지 않도록 아래에 경고를 보여준다.
+        top3 = watch3.copy()
 
     detail_popup = make_stock_dialog(
         score_df=score_df,
@@ -2456,7 +2872,8 @@ def show_realtime_recommendations(
         classification_df=classification_df,
         theme_history_df=theme_history_df,
     )
-    codes = tuple(clean_code(code) for code in top3["종목코드"].tolist())
+    display_df = pd.concat([top3, watch3]).drop_duplicates("종목코드", keep="first")
+    codes = tuple(clean_code(code) for code in display_df["종목코드"].tolist())
     realtime_enabled = st.toggle(
         "초단위 체결가 반영",
         value=True,
@@ -2466,7 +2883,7 @@ def show_realtime_recommendations(
     realtime_status = ""
     if realtime_enabled:
         hub = get_realtime_quote_hub()
-        hub.ensure_codes(codes)
+        hub.ensure_codes(codes, source="dashboard_top3")
         realtime = hub.snapshot(codes)
         quotes = realtime["quotes"]
         if realtime["connected"]:
@@ -2479,6 +2896,10 @@ def show_realtime_recommendations(
 
     if not quotes:
         quotes = load_recommendation_quotes(codes)
+
+    st.subheader("매수 가능 TOP 3" if has_buyable_top3 else "현재 관찰 후보 TOP 3")
+    if not has_buyable_top3:
+        st.info("현재는 점수·돌파 확인·추격위험 조건을 모두 통과한 매수 가능 종목이 없습니다. 아래 종목은 관찰용이며 매수 추천이 아닙니다.")
 
     columns = st.columns(len(top3))
     for index, (_, row) in enumerate(top3.iterrows()):
@@ -2506,18 +2927,115 @@ def show_realtime_recommendations(
         columns[index].caption(
             f"{code} · 점수 {row[score_column]:.2f} · {recommendation} · 진입 {row.get('진입판단', '갱신 대기')}{risk_text}"
         )
-        if recommendation in {"약세", "제외"}:
+        if recommendation not in {"강력관심", "관심"} or not has_buyable_top3:
             columns[index].warning(
-                "점수 상위 후보이지만 현재 매수 추천은 아닙니다. "
-                "상세 분석에서 급등 사유와 위험 요인을 확인하세요."
+                "관찰 후보입니다. 돌파 확인과 추격 위험 조건을 통과하기 전에는 매수하지 않습니다."
             )
         if columns[index].button("상세 분석 보기", key=f"realtime_detail_{code}"):
             detail_popup(name, code)
+
+    if has_buyable_top3 and not watch3.empty:
+        st.subheader("현재 관찰 후보 TOP 3")
+        watch_view = watch3.copy()
+        watch_view["사유"] = (
+            "진입 " + watch_view["진입판단"].fillna("관찰")
+            + " · 돌파신뢰도 " + watch_view["돌파신뢰도"].map(lambda value: f"{safe_float(value):.0f}점")
+            + " · 추격위험 " + watch_view["추격위험도"].map(lambda value: f"{safe_float(value):.0f}점")
+        )
+        view_columns = [column for column in ["종목코드", "종목명", score_column, "최종추천", "사유"] if column in watch_view.columns]
+        st.dataframe(watch_view[view_columns], use_container_width=True, hide_index=True)
 
     if realtime_enabled:
         st.caption(realtime_status)
     else:
         st.caption("현재가는 KIS REST 조회값이며, 약 20초마다 새로 조회됩니다.")
+
+
+def show_morning_briefing(history_df: pd.DataFrame, supply_df: pd.DataFrame):
+    st.header("오늘 장 준비")
+    st.caption("전일 마감 기준의 사전 관찰 계획입니다. 아래 현재 매수 판단과 종목이 달라질 수 있으며, 매수 확정 신호가 아닙니다.")
+
+    if history_df is None or history_df.empty or "저장일자" not in history_df.columns:
+        st.info("전일 마감 분석 데이터가 아직 없습니다.")
+        return
+
+    briefing = history_df.copy()
+    briefing["저장일자"] = pd.to_datetime(briefing["저장일자"], errors="coerce").dt.date
+    available_dates = sorted(briefing["저장일자"].dropna().unique())
+    if not available_dates:
+        st.info("분석 기준일을 확인할 수 없습니다.")
+        return
+
+    today = pd.Timestamp.now().date()
+    previous_dates = [date for date in available_dates if date < today]
+    reference_date = max(previous_dates) if previous_dates else max(available_dates)
+    briefing = briefing[briefing["저장일자"] == reference_date].copy()
+    if "저장시간" in briefing.columns:
+        briefing = briefing.sort_values("저장시간").drop_duplicates("종목코드", keep="last")
+
+    score_column = "최종점수" if "최종점수" in briefing.columns else "총점"
+    briefing[score_column] = pd.to_numeric(briefing[score_column], errors="coerce").fillna(0)
+    if "추격위험도" in briefing.columns:
+        briefing["추격위험도"] = pd.to_numeric(briefing["추격위험도"], errors="coerce").fillna(50)
+        safe_candidates = briefing[briefing["추격위험도"] <= 70].copy()
+        if not safe_candidates.empty:
+            briefing = safe_candidates
+    briefing = briefing.sort_values(score_column, ascending=False).head(5)
+
+    latest_supply_map = {}
+    if supply_df is not None and not supply_df.empty and "종목코드" in supply_df.columns:
+        supply_before_open = supply_df.copy()
+        supply_before_open["날짜"] = pd.to_datetime(supply_before_open["날짜"], errors="coerce")
+        supply_before_open = supply_before_open[supply_before_open["날짜"].dt.date <= reference_date]
+        for code, group in supply_before_open.groupby("종목코드"):
+            group = group.sort_values("날짜").drop_duplicates("날짜", keep="last")
+            recent3 = group.tail(3)
+            latest_supply_map[clean_code(code)] = {
+                "외국인3일": safe_float(recent3.get("외국인순매수량", pd.Series(dtype=float)).sum()),
+                "기관3일": safe_float(recent3.get("기관순매수량", pd.Series(dtype=float)).sum()),
+            }
+
+    st.info(f"분석 기준일: {reference_date} 장 마감 · 오늘은 시초가와 거래량을 확인한 뒤 계획을 유지하거나 취소하세요.")
+    rows = []
+    for _, row in briefing.iterrows():
+        code = clean_code(row.get("종목코드", ""))
+        supply = latest_supply_map.get(code, {})
+        foreign_3d = safe_float(supply.get("외국인3일", row.get("외국인3일합계", 0)))
+        institution_3d = safe_float(supply.get("기관3일", row.get("기관3일합계", 0)))
+        risk = safe_float(row.get("추격위험도", 0))
+        resistance = safe_float(row.get("최근저항선", row.get("목표저항선", 0)))
+        support = safe_float(row.get("최근지지선", row.get("손절기준", 0)))
+        entry_value = row.get("진입판단", "")
+        entry = str(entry_value).strip() if pd.notna(entry_value) else ""
+        if not entry or entry.lower() == "nan":
+            recommendation_value = row.get("최종추천", "")
+            recommendation = str(recommendation_value).strip() if pd.notna(recommendation_value) else ""
+            entry = recommendation if recommendation and recommendation.lower() != "nan" else "관찰 대기"
+        supply_parts = []
+        if foreign_3d:
+            supply_parts.append(f"외국인 3일 {foreign_3d:+,.0f}주")
+        if institution_3d:
+            supply_parts.append(f"기관 3일 {institution_3d:+,.0f}주")
+        reason_value = row.get("AI추천사유", "")
+        fallback_reason = str(reason_value).strip() if pd.notna(reason_value) else ""
+        if not fallback_reason or fallback_reason.lower() == "nan":
+            fallback_reason = "전일 점수 상위 · 장 시작 후 수급과 거래량 확인 필요"
+        reason = " · ".join(supply_parts) or fallback_reason
+        trigger = f"{resistance:,.0f}원 돌파 확인" if resistance > 0 else "시초가와 거래량 확인"
+        cancel = f"{support:,.0f}원 이탈 시 제외" if support > 0 else "시초가 급등 시 추격 금지"
+        rows.append(
+            {
+                "종목": f"{row.get('종목명', code)} ({code})",
+                "전일점수": safe_float(row.get(score_column, 0)),
+                "오늘 계획": entry,
+                "관찰 조건": trigger,
+                "계획 취소": cancel,
+                "추격위험": f"{risk:.0f}점",
+                "선정 근거": reason,
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.caption("장 시작 후 시초가가 전일 종가보다 크게 뛰거나 지지선을 이탈하면 전일 분석보다 오늘 가격 행동을 우선합니다.")
 
 
 def show_market_home(
@@ -2530,26 +3048,34 @@ def show_market_home(
     classification_df: pd.DataFrame,
     theme_history_df: pd.DataFrame,
 ):
-    combined_df = pd.concat(
-        [history_df, current_df],
-        ignore_index=True,
-        sort=False,
-    )
-    combined_df = normalize_score_df(combined_df)
+    show_market_overview()
 
+    st.divider()
     show_ai_analysis(
-        score_df=combined_df,
+        score_df=history_df,
         chart_df=chart_df,
         master_df=master_df,
     )
 
     st.divider()
-    show_market_overview()
+    show_prediction_performance_summary()
+
+
+def show_today_preparation_and_recommendations(
+    current_df: pd.DataFrame,
+    history_df: pd.DataFrame,
+    chart_df: pd.DataFrame,
+    supply_df: pd.DataFrame,
+    news_df: pd.DataFrame,
+    classification_df: pd.DataFrame,
+    theme_history_df: pd.DataFrame,
+):
+    show_morning_briefing(history_df=history_df, supply_df=supply_df)
 
     st.divider()
     show_realtime_recommendations(
         current_df=current_df,
-        score_df=combined_df,
+        score_df=history_df,
         chart_df=chart_df,
         supply_df=supply_df,
         news_df=news_df,
@@ -3091,15 +3617,6 @@ def show_ai_analysis(score_df: pd.DataFrame, chart_df: pd.DataFrame, master_df: 
 
     st.session_state.gemini_model = DEFAULT_MODEL
 
-    if st.button("대화 초기화", use_container_width=True):
-        st.session_state.gemini_messages = [
-            {
-                "role": "assistant",
-                "content": "대화를 초기화했습니다. 새 질문을 입력해 주세요.",
-            }
-        ]
-        st.rerun()
-
     for message in st.session_state.gemini_messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
@@ -3132,6 +3649,572 @@ def show_ai_analysis(score_df: pd.DataFrame, chart_df: pd.DataFrame, master_df: 
     st.session_state.gemini_messages.append(
         {"role": "assistant", "content": response_text}
     )
+
+
+def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"):
+    st.header("모의투자")
+    st.caption("실제 주문은 전송되지 않습니다. 초기 자금 1억 원, 매수·매도 수수료와 매도세가 반영됩니다.")
+    order_confirmation = st.session_state.pop("paper_order_confirmation", None)
+    if order_confirmation:
+        st.success(order_confirmation)
+    profit_detail_open = st.session_state.get("show_paper_profit_detail", False)
+    needs_live_price = section in {"모의 주문", "보유 종목"}
+    # 주문 화면은 버튼 클릭이 자동 새로고침과 겹치지 않게 한다.
+    # 초단위 갱신은 평가손익이 필요한 보유 종목 화면에서만 사용한다.
+    needs_realtime_refresh = section == "보유 종목"
+    if needs_realtime_refresh and not profit_detail_open:
+        st_autorefresh(interval=1000, key="paper_trading_realtime_refresh")
+        st.caption("장이 열려 있을 때 보유 종목과 수익률을 1초마다 갱신합니다.")
+    elif needs_realtime_refresh:
+        st.caption("손익 분석을 보는 동안 실시간 갱신이 잠시 멈춥니다.")
+
+    def open_profit_detail():
+        st.session_state["show_paper_profit_detail"] = True
+
+    def close_profit_detail():
+        st.session_state["show_paper_profit_detail"] = False
+
+    account = get_paper_account()
+    positions = get_paper_positions()
+    paper_orders = get_paper_orders(limit=10000)
+    previous_price_map = st.session_state.get("paper_previous_prices", {})
+    price_map = {}
+    token = None
+    if needs_live_price:
+        try:
+            token = get_access_token()
+        except Exception:
+            token = None
+
+    if not positions.empty and token:
+        for code in positions["stock_code"].astype(str):
+            try:
+                body = get_current_price(token, clean_code(code))
+                output = body.get("output", {}) if isinstance(body, dict) else {}
+                price_map[clean_code(code)] = float(output.get("stck_prpr", 0) or 0)
+            except Exception:
+                price_map[clean_code(code)] = 0
+
+    if positions.empty:
+        market_value = 0.0
+        unrealized = 0.0
+    else:
+        positions["현재가"] = positions.apply(
+            lambda row: price_map.get(clean_code(row["stock_code"]), 0) or row["average_price"], axis=1
+        )
+        positions["평가금액"] = positions["현재가"] * positions["quantity"]
+        positions["평가손익"] = positions["평가금액"] - positions["average_price"] * positions["quantity"]
+        positions["수익률(%)"] = positions["평가손익"] / (positions["average_price"] * positions["quantity"]) * 100
+        positions["직전가격"] = positions.apply(
+            lambda row: previous_price_map.get(
+                clean_code(row["stock_code"]), row["현재가"]
+            ),
+            axis=1,
+        )
+        positions["1초변동손익"] = (
+            positions["현재가"] - positions["직전가격"]
+        ) * positions["quantity"]
+        market_value = float(positions["평가금액"].sum())
+        unrealized = float(positions["평가손익"].sum())
+        st.session_state["paper_previous_prices"] = {
+            clean_code(row["stock_code"]): float(row["현재가"])
+            for _, row in positions.iterrows()
+        }
+
+    gross_average_map = {}
+    if paper_orders is not None and not paper_orders.empty:
+        reconstructed = {}
+        for _, order in paper_orders.sort_values("id").iterrows():
+            code = clean_code(order["stock_code"])
+            state = reconstructed.setdefault(code, {"quantity": 0, "gross_average": 0.0})
+            order_quantity = int(order["quantity"])
+            if str(order["side"]).upper() == "BUY":
+                new_quantity = state["quantity"] + order_quantity
+                state["gross_average"] = (
+                    state["quantity"] * state["gross_average"]
+                    + order_quantity * float(order["price"])
+                ) / new_quantity
+                state["quantity"] = new_quantity
+            else:
+                state["quantity"] = max(0, state["quantity"] - order_quantity)
+                if state["quantity"] == 0:
+                    state["gross_average"] = 0.0
+        gross_average_map = {
+            code: state["gross_average"] for code, state in reconstructed.items()
+        }
+
+    supply_context = {}
+    if supply_df is not None and not supply_df.empty and "종목코드" in supply_df.columns:
+        for code in positions.get("stock_code", pd.Series(dtype=str)).astype(str):
+            clean_stock_code = clean_code(code)
+            stock_supply = supply_df[supply_df["종목코드"] == clean_stock_code].copy()
+            if stock_supply.empty:
+                continue
+            stock_supply = stock_supply.sort_values("날짜").drop_duplicates("날짜", keep="last")
+            latest_supply = stock_supply.iloc[-1]
+            recent3 = stock_supply.tail(3)
+            supply_context[clean_stock_code] = {
+                "기준일": latest_supply["날짜"].strftime("%Y-%m-%d") if pd.notna(latest_supply["날짜"]) else "확인 불가",
+                "외국인": safe_float(latest_supply.get("외국인순매수량", 0)),
+                "기관": safe_float(latest_supply.get("기관순매수량", 0)),
+                "개인": safe_float(latest_supply.get("개인순매수량", 0)),
+                "외국인3일": safe_float(recent3.get("외국인순매수량", pd.Series(dtype=float)).sum()),
+                "기관3일": safe_float(recent3.get("기관순매수량", pd.Series(dtype=float)).sum()),
+            }
+
+    total_assets = float(account["cash"]) + market_value
+    total_return = total_assets - float(account["initial_cash"])
+    cols = st.columns(4)
+    cols[0].metric("총 자산", f"{total_assets:,.0f}원", f"{total_return:,.0f}원")
+    cols[1].metric("주문 가능 금액", f"{float(account['cash']):,.0f}원")
+    cols[2].metric("주식 평가액", f"{market_value:,.0f}원")
+    st.markdown(
+        """
+        <style>
+        .st-key-paper_profit_card {
+            margin-top: -8px;
+        }
+        .st-key-paper_profit_card button {
+            min-height: 104px;
+            padding: 8px 12px;
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 10px;
+            color: #111827;
+            text-align: left;
+            justify-content: flex-start;
+            transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+        }
+        .st-key-paper_profit_card button div {
+            width: 100%;
+            align-items: flex-start;
+        }
+        .st-key-paper_profit_card button p {
+            width: 100%;
+            text-align: left;
+            margin: 0;
+        }
+        .st-key-paper_profit_card button p:first-child {
+            font-size: 14px;
+            font-weight: 400;
+            margin-bottom: 12px;
+        }
+        .st-key-paper_profit_card button p:last-child {
+            font-size: 32px;
+            line-height: 1.2;
+            font-weight: 400;
+        }
+        .st-key-paper_profit_card button:hover {
+            background: #2563eb;
+            border-color: #2563eb;
+            color: #ffffff;
+        }
+        .st-key-paper_profit_card button:hover p {
+            color: #ffffff;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    with cols[3]:
+        with st.container(key="paper_profit_card"):
+            st.button(
+                f"평가손익\n\n{unrealized:,.0f}원",
+                key="paper_profit_detail_button",
+                use_container_width=True,
+                on_click=open_profit_detail,
+            )
+
+    if st.session_state.get("show_paper_profit_detail", False):
+        st.subheader("평가손익 변동 이유")
+        if positions.empty:
+            st.info("보유 종목이 없어 분석할 평가손익이 없습니다.")
+        else:
+            one_second_change = float(positions["1초변동손익"].sum())
+            direction = "올랐습니다" if one_second_change > 0 else "떨어졌습니다" if one_second_change < 0 else "변동이 없습니다"
+            st.info(
+                f"직전 1초와 비교해 평가손익이 {one_second_change:+,.0f}원 {direction}. "
+                "현재가 변동 × 보유수량으로 계산한 값입니다."
+            )
+            st.caption(
+                "외국인·기관 수급은 가격 변동의 참고 근거이며 원인을 확정하지는 않습니다. "
+                "장 마감 후에는 마지막 거래일 기준 수급을 표시합니다."
+            )
+            positions["수급 기준일"] = positions["stock_code"].map(
+                lambda code: supply_context.get(clean_code(code), {}).get("기준일", "자료 없음")
+            )
+            for label in ["외국인", "기관", "개인", "외국인3일", "기관3일"]:
+                positions[label] = positions["stock_code"].map(
+                    lambda code, key=label: supply_context.get(clean_code(code), {}).get(key, 0)
+                )
+
+            def describe_supply(row):
+                foreign = safe_float(row["외국인"])
+                institution = safe_float(row["기관"])
+                personal = safe_float(row["개인"])
+                price_profit = safe_float(row["평가손익"])
+                buyers = []
+                sellers = []
+                for investor, value in [("외국인", foreign), ("기관", institution), ("개인", personal)]:
+                    if value > 0:
+                        buyers.append((investor, value))
+                    elif value < 0:
+                        sellers.append((investor, value))
+                buyers.sort(key=lambda item: item[1], reverse=True)
+                sellers.sort(key=lambda item: item[1])
+                movement = "상승" if price_profit > 0 else "하락" if price_profit < 0 else "보합"
+                if buyers and sellers:
+                    return (
+                        f"{movement} 구간 · {buyers[0][0]} {buyers[0][1]:+,.0f}주 순매수, "
+                        f"{sellers[0][0]} {sellers[0][1]:+,.0f}주 순매도"
+                    )
+                if buyers:
+                    return f"{movement} 구간 · {buyers[0][0]} {buyers[0][1]:+,.0f}주 순매수 우세"
+                if sellers:
+                    return f"{movement} 구간 · {sellers[0][0]} {sellers[0][1]:+,.0f}주 순매도 우세"
+                return f"{movement} 구간 · 투자자별 수급 자료 없음"
+
+            positions["수급 해석"] = positions.apply(describe_supply, axis=1)
+            positions["수수료 제외 평균매수가"] = positions.apply(
+                lambda row: gross_average_map.get(
+                    clean_code(row["stock_code"]), float(row["average_price"])
+                ),
+                axis=1,
+            )
+            positions["주가 변동 손익"] = (
+                positions["현재가"] - positions["수수료 제외 평균매수가"]
+            ) * positions["quantity"]
+            positions["매수 수수료"] = (
+                positions["average_price"] - positions["수수료 제외 평균매수가"]
+            ) * positions["quantity"]
+
+            def describe_direct_cause(row):
+                price_effect = safe_float(row["주가 변동 손익"])
+                buy_fee = max(0.0, safe_float(row["매수 수수료"]))
+                total_profit = safe_float(row["평가손익"])
+                if abs(price_effect) < 0.5 and buy_fee >= 0.5:
+                    return f"현재가 변동 없음 · 손실 {abs(total_profit):,.0f}원은 매수 수수료"
+                price_word = "상승 이익" if price_effect > 0 else "하락 손실"
+                if total_profit >= 0:
+                    return (
+                        f"주가 {price_word} {abs(price_effect):,.0f}원에서 "
+                        f"매수 수수료 {buy_fee:,.0f}원을 뺀 순이익"
+                    )
+                return (
+                    f"주가 {price_word} {abs(price_effect):,.0f}원과 "
+                    f"매수 수수료 {buy_fee:,.0f}원이 만든 순손실"
+                )
+
+            positions["직접 원인"] = positions.apply(describe_direct_cause, axis=1)
+            portfolio_price_effect = float(positions["주가 변동 손익"].sum())
+            portfolio_buy_fees = float(positions["매수 수수료"].sum())
+            st.success(
+                f"현재 평가손익 {unrealized:+,.0f}원의 직접 구성: "
+                f"주가 변동 {portfolio_price_effect:+,.0f}원 - "
+                f"매수 수수료 {portfolio_buy_fees:,.0f}원. "
+                "외국인·기관 수급은 아래에 참고 배경으로만 표시합니다."
+            )
+            detail_df = positions[
+                [
+                    "stock_name",
+                    "quantity",
+                    "average_price",
+                    "직전가격",
+                    "현재가",
+                    "1초변동손익",
+                    "평가손익",
+                    "수익률(%)",
+                    "수급 기준일",
+                    "외국인",
+                    "기관",
+                    "개인",
+                    "외국인3일",
+                    "기관3일",
+                    "수급 해석",
+                    "수수료 제외 평균매수가",
+                    "주가 변동 손익",
+                    "매수 수수료",
+                    "직접 원인",
+                ]
+            ].copy()
+            detail_df = detail_df.sort_values("1초변동손익", ascending=False)
+            detail_df = detail_df.rename(
+                columns={
+                    "stock_name": "종목명",
+                    "quantity": "보유수량",
+                    "average_price": "평균매수가",
+                    "직전가격": "1초 전 가격",
+                    "현재가": "현재가",
+                    "1초변동손익": "1초 손익변동",
+                    "평가손익": "누적 평가손익",
+                    "외국인": "외국인 당일 순매수",
+                    "기관": "기관 당일 순매수",
+                    "개인": "개인 당일 순매수",
+                    "외국인3일": "외국인 최근 3일",
+                    "기관3일": "기관 최근 3일",
+                }
+            )
+            summary_df = detail_df[
+                [
+                    "종목명",
+                    "누적 평가손익",
+                    "수익률(%)",
+                    "직접 원인",
+                    "외국인 당일 순매수",
+                    "기관 당일 순매수",
+                ]
+            ].copy()
+            summary_df["누적 평가손익"] = summary_df["누적 평가손익"].map(lambda value: f"{value:+,.0f}원")
+            summary_df["수익률(%)"] = summary_df["수익률(%)"].map(lambda value: f"{value:+.2f}%")
+            summary_df["외국인 당일 순매수"] = summary_df["외국인 당일 순매수"].map(
+                lambda value: f"{value:+,.0f}주"
+            )
+            summary_df["기관 당일 순매수"] = summary_df["기관 당일 순매수"].map(
+                lambda value: f"{value:+,.0f}주"
+            )
+            st.dataframe(
+                summary_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "직접 원인": st.column_config.TextColumn(width="large"),
+                },
+            )
+            with st.expander("가격·개인·최근 3일 상세 데이터 보기"):
+                st.dataframe(detail_df, use_container_width=True, hide_index=True)
+            biggest_up = detail_df.iloc[0]
+            biggest_down = detail_df.iloc[-1]
+            reason_cols = st.columns(2)
+            reason_cols[0].metric(
+                "가장 크게 올린 종목",
+                str(biggest_up["종목명"]),
+                f"{biggest_up['1초 손익변동']:+,.0f}원",
+            )
+            reason_cols[1].metric(
+                "가장 크게 내린 종목",
+                str(biggest_down["종목명"]),
+                f"{biggest_down['1초 손익변동']:+,.0f}원",
+            )
+        st.button(
+            "손익 분석 닫기",
+            key="paper_profit_detail_close_button",
+            use_container_width=True,
+            on_click=close_profit_detail,
+        )
+
+    if section == "보유 종목":
+        st.subheader("보유 종목")
+        if positions.empty:
+            st.info("보유 중인 모의투자 종목이 없습니다.")
+        else:
+            show_theme_aware_table(format_paper_positions_for_display(positions))
+        return
+
+    if section == "거래 내역":
+        st.subheader("거래 내역")
+        history_orders = paper_orders.copy()
+        if history_orders.empty:
+            st.info("아직 체결된 모의 주문이 없습니다.")
+        else:
+            history_orders["주문일시"] = pd.to_datetime(
+                history_orders["ordered_at"], errors="coerce"
+            )
+            period_options = ["오늘", "최근 1주", "최근 1개월", "직접 설정", "전체"]
+            selected_period = st.radio(
+                "조회 기간",
+                period_options,
+                horizontal=True,
+                key="paper_order_period",
+            )
+            today = date.today()
+            start_date = None
+            end_date = today
+            if selected_period == "오늘":
+                start_date = today
+            elif selected_period == "최근 1주":
+                start_date = today - timedelta(days=6)
+            elif selected_period == "최근 1개월":
+                start_date = today - timedelta(days=29)
+            elif selected_period == "직접 설정":
+                start_col, end_col = st.columns(2)
+                start_date = start_col.date_input(
+                    "시작일", value=today - timedelta(days=6), key="paper_order_start_date"
+                )
+                end_date = end_col.date_input(
+                    "종료일", value=today, key="paper_order_end_date"
+                )
+                if start_date > end_date:
+                    st.error("시작일은 종료일보다 늦을 수 없습니다.")
+                    return
+
+            filtered_orders = history_orders.copy()
+            if start_date is not None:
+                filtered_orders = filtered_orders[
+                    filtered_orders["주문일시"].dt.date >= start_date
+                ]
+            if selected_period != "전체":
+                filtered_orders = filtered_orders[
+                    filtered_orders["주문일시"].dt.date <= end_date
+                ]
+
+            buy_orders = filtered_orders[filtered_orders["side"] == "BUY"]
+            sell_orders = filtered_orders[filtered_orders["side"] == "SELL"]
+            buy_total = float(buy_orders["amount"].sum())
+            sell_total = float(sell_orders["amount"].sum())
+            order_count = len(filtered_orders)
+            total_fees = float(filtered_orders["fee"].sum() + filtered_orders["tax"].sum())
+
+            amount_cols = st.columns(4)
+            amount_cols[0].metric("매수 총금액", f"{buy_total:,.0f}원")
+            amount_cols[1].metric("매도 총금액", f"{sell_total:,.0f}원")
+            amount_cols[2].metric("매도 실현손익", f"{float(sell_orders['realized_profit'].sum()):+,.0f}원")
+            amount_cols[3].metric("체결 건수", f"{order_count:,}건", f"비용 {total_fees:,.0f}원")
+            st.caption(
+                "매수 총금액은 매수 수수료를 포함한 실제 지출액이고, "
+                "매도 총금액은 매도 수수료·세금을 뺀 실제 입금액입니다."
+            )
+
+            if filtered_orders.empty:
+                st.info("선택한 기간에 체결된 모의 주문이 없습니다.")
+            else:
+                display_orders = filtered_orders.copy()
+                display_orders["side"] = display_orders["side"].map({"BUY": "매수", "SELL": "매도"})
+                display_orders["주문일시"] = display_orders["주문일시"].dt.strftime("%Y-%m-%d %H:%M:%S")
+                display_orders = display_orders.rename(
+                    columns={
+                        "side": "구분",
+                        "stock_code": "종목코드",
+                        "stock_name": "종목명",
+                        "quantity": "수량",
+                        "price": "체결가",
+                        "fee": "수수료",
+                        "tax": "세금",
+                        "amount": "실제 금액",
+                        "realized_profit": "실현손익",
+                    }
+                )
+                display_orders["수량"] = display_orders["수량"].map(
+                    lambda value: f"{safe_float(value):,.0f}"
+                )
+                for column in ["체결가", "실제 금액", "수수료", "세금"]:
+                    display_orders[column] = display_orders[column].map(
+                        lambda value: f"{safe_float(value):,.0f}원"
+                    )
+                display_orders["실현손익"] = display_orders["실현손익"].map(
+                    lambda value: f"{safe_float(value):+,.0f}원"
+                )
+                show_theme_aware_table(
+                    display_orders[
+                        ["주문일시", "구분", "종목코드", "종목명", "수량", "체결가", "실제 금액", "수수료", "세금", "실현손익"]
+                    ]
+                )
+        return
+
+    st.subheader("모의 주문")
+    candidates = pd.concat([master_df, current_df], ignore_index=True, sort=False)
+    if not candidates.empty and {"종목코드", "종목명"}.issubset(candidates.columns):
+        candidates = candidates[["종목코드", "종목명"]].dropna().drop_duplicates("종목코드")
+        candidates["종목코드"] = candidates["종목코드"].map(clean_code)
+        options = {
+            f"{row['종목명']} ({row['종목코드']})": (row["종목코드"], row["종목명"])
+            for _, row in candidates.sort_values("종목명").iterrows()
+        }
+        selected_label = st.selectbox("종목", list(options))
+        code, name = options[selected_label]
+        live_price = 0.0
+        if token:
+            try:
+                body = get_current_price(token, code)
+                live_price = float((body.get("output") or {}).get("stck_prpr", 0) or 0)
+            except Exception:
+                live_price = 0.0
+        order_cols = st.columns(3)
+        quantity = order_cols[0].number_input("수량", min_value=1, value=1, step=1)
+        latest_quote = st.session_state.get("paper_order_live_quotes", {}).get(code, {})
+        display_price = safe_float(latest_quote.get("price", 0)) or live_price
+        with order_cols[1]:
+            show_paper_order_live_price(code, live_price)
+            if display_price > 0:
+                price = display_price
+            else:
+                price = st.number_input(
+                    "현재가 미수신 · 체결 가격",
+                    min_value=1.0,
+                    value=1.0,
+                    step=100.0,
+                )
+                st.caption("KIS 연결을 확인해 주세요. 체결 시 현재가를 다시 조회합니다.")
+        order_cols[2].metric("예상 주문금액", f"{quantity * price:,.0f}원")
+
+        def execute_paper_order(side):
+            try:
+                execution_price = price
+                if token:
+                    latest_body = get_current_price(token, code)
+                    latest_price = float(
+                        (latest_body.get("output") or {}).get("stck_prpr", 0) or 0
+                    )
+                    if latest_price > 0:
+                        execution_price = latest_price
+                result = place_paper_order(
+                    side,
+                    code,
+                    name,
+                    quantity,
+                    execution_price,
+                )
+                side_label = "매수" if side == "BUY" else "매도"
+                st.session_state["paper_order_confirmation"] = (
+                    f"{name} {quantity:,}주 {side_label}가 현재가 "
+                    f"{execution_price:,.0f}원에 체결되었습니다. "
+                    f"체결금액 {result['amount']:,.0f}원"
+                )
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"모의 주문 처리 중 오류가 발생했습니다: {exc}")
+
+        buy_col, sell_col = st.columns(2)
+        if buy_col.button(
+            "매수",
+            key="paper_buy_button",
+            type="primary",
+            use_container_width=True,
+        ):
+            execute_paper_order("BUY")
+        if sell_col.button(
+            "매도",
+            key="paper_sell_button",
+            use_container_width=True,
+        ):
+            execute_paper_order("SELL")
+    else:
+        st.warning("주문 가능한 종목 목록이 없습니다.")
+
+    if section == "모의 주문":
+        return
+
+    st.subheader("보유 종목")
+    if positions.empty:
+        st.info("보유 중인 모의투자 종목이 없습니다.")
+    else:
+        display = positions.rename(columns={"stock_code": "종목코드", "stock_name": "종목명", "quantity": "수량", "average_price": "평균단가"})
+        st.dataframe(display[["종목코드", "종목명", "수량", "평균단가", "현재가", "평가금액", "평가손익", "수익률(%)"]], use_container_width=True, hide_index=True)
+
+    st.subheader("거래 내역")
+    orders = get_paper_orders()
+    if orders.empty:
+        st.info("아직 체결된 모의 주문이 없습니다.")
+    else:
+        orders["side"] = orders["side"].map({"BUY": "매수", "SELL": "매도"})
+        st.dataframe(orders, use_container_width=True, hide_index=True)
+
+    with st.expander("모의계좌 초기화"):
+        if st.button("초기 자금 1억 원으로 초기화"):
+            reset_paper_account()
+            st.success("모의계좌를 초기화했습니다.")
+            st.rerun()
 
 
 # -----------------------------
@@ -3192,20 +4275,116 @@ def main():
         load_table("stock_theme_history")
     )
 
-    menu = st.sidebar.radio(
-        "메뉴",
-        [
-            "시장 현황",
-            "현재 추천 TOP30",
-            "종목 검색",
-            "업종·테마 강도",
-            "장중 흐름",
-            "과거 분석",
-            "DB 상태",
-        ],
-    )
+    if "active_dashboard_page" not in st.session_state:
+        st.session_state["active_dashboard_page"] = "홈"
+    elif st.session_state["active_dashboard_page"] == "오늘 장 준비·시장 현황":
+        # 기존 화면을 열어 둔 사용자는 새 홈 메뉴로 자연스럽게 이동시킨다.
+        st.session_state["active_dashboard_page"] = "홈"
 
-    if menu == "시장 현황":
+    selected_theme = st.sidebar.radio(
+        "화면 테마",
+        ["화이트", "다크"],
+        horizontal=True,
+        key="dashboard_theme",
+    )
+    # 다크에서는 Streamlit 캔버스 표가 검은 글자를 남기는 경우가 있어,
+    # 앱 전역의 dataframe 출력을 읽기 쉬운 HTML 표로 통일한다.
+    st.dataframe = show_theme_aware_table if selected_theme == "다크" else _NATIVE_DATAFRAME
+
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"] .stButton > button {
+            min-height: 29px;
+            padding: 3px 8px;
+            border: 0 !important;
+            border-radius: 6px;
+            background: transparent;
+            box-shadow: none !important;
+            color: #374151;
+            justify-content: flex-start;
+            text-align: left;
+            font-weight: 400;
+        }
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2 {
+            margin: 0.45rem 0 0.1rem;
+            font-size: 1rem;
+            line-height: 1.2;
+        }
+        [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+            gap: 0.08rem;
+        }
+        [data-testid="stSidebar"] .stButton > button:hover {
+            background: #eff6ff;
+            color: #2563eb;
+        }
+        [data-testid="stSidebar"] .stButton > button[kind="primary"] {
+            background: #eff6ff;
+            color: #2563eb;
+            font-weight: 700;
+        }
+        [data-testid="stSidebar"] .stButton > button:focus:not(:active) {
+            color: #2563eb;
+            border: 0 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    apply_display_theme(selected_theme)
+
+    def sidebar_page_button(label, page, key):
+        active = st.session_state["active_dashboard_page"] == page
+        if st.sidebar.button(
+            label,
+            key=key,
+            use_container_width=True,
+            type="primary" if active else "secondary",
+        ):
+            st.session_state["active_dashboard_page"] = page
+            st.rerun()
+
+    st.sidebar.markdown("## 🏠 홈")
+    sidebar_page_button("홈", "홈", "nav_home")
+
+    st.sidebar.markdown("## 🗓️ 오늘의 투자")
+    sidebar_page_button(
+        "오늘 장 준비·실시간 추천",
+        "오늘 장 준비·실시간 추천",
+        "nav_today_recommendations",
+    )
+    sidebar_page_button("장중 흐름", "장중 흐름", "nav_intraday")
+    sidebar_page_button("추천 TOP30", "추천 TOP30", "nav_top30")
+
+    st.sidebar.markdown("## 🔎 종목 분석")
+    sidebar_page_button("종목 검색", "종목 검색", "nav_search")
+    sidebar_page_button("업종·테마", "업종·테마", "nav_sector")
+    sidebar_page_button("과거 분석", "과거 분석", "nav_history")
+
+    st.sidebar.markdown("## 💰 모의투자")
+    sidebar_page_button("모의 주문", "모의 주문", "nav_paper_order")
+    sidebar_page_button("보유 종목", "보유 종목", "nav_paper_positions")
+    sidebar_page_button("거래 내역", "거래 내역", "nav_paper_history")
+
+    st.sidebar.markdown("## ⚙️ 관리")
+    sidebar_page_button("DB 상태", "DB 상태", "nav_db")
+
+    menu = st.session_state["active_dashboard_page"]
+
+    if menu in {"모의 주문", "보유 종목", "거래 내역"}:
+        show_paper_trading(
+            master_df=master_df,
+            current_df=current_df,
+            supply_df=supply_df,
+            section=menu,
+        )
+        return
+
+    if menu == "DB 상태":
+        show_db_status()
+        return
+
+    if menu == "홈":
         show_market_home(
             current_df=current_df,
             history_df=history_df,
@@ -3218,18 +4397,26 @@ def main():
         )
         return
 
-    if menu == "업종·테마 강도":
+    if menu == "오늘 장 준비·실시간 추천":
+        show_today_preparation_and_recommendations(
+            current_df=current_df,
+            history_df=history_df,
+            chart_df=chart_df,
+            supply_df=supply_df,
+            news_df=news_df,
+            classification_df=classification_df,
+            theme_history_df=theme_history_df,
+        )
+        return
+
+    if menu == "업종·테마":
         show_sector_strength(
             current_df=current_df,
             classification_df=classification_df,
         )
         return
 
-    if menu == "DB 상태":
-        show_db_status()
-        return
-
-    if menu == "현재 추천 TOP30":
+    if menu == "추천 TOP30":
         show_current_status_banner(current_df)
 
         if current_df.empty:
@@ -3254,15 +4441,8 @@ def main():
         return
 
     if menu == "종목 검색":
-        combined_df = pd.concat(
-            [history_df, current_df],
-            ignore_index=True,
-            sort=False,
-        )
-        combined_df = normalize_score_df(combined_df)
-
         show_stock_search(
-            score_df=combined_df,
+            score_df=history_df,
             chart_df=chart_df,
             supply_df=supply_df,
             news_df=news_df,
