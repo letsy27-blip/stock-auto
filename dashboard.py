@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
@@ -2779,8 +2780,100 @@ def load_recommendation_quotes(stock_codes: tuple[str, ...]) -> dict[str, dict]:
             "price": safe_float(output.get("stck_prpr")),
             "change": safe_float(output.get("prdy_vrss")),
             "change_rate": safe_float(output.get("prdy_ctrt")),
+            "open": safe_float(output.get("stck_oprc")),
+            "previous_close": safe_float(output.get("stck_sdpr")),
         }
     return quotes
+
+
+def show_recommendation_mini_chart(
+    container,
+    chart_df: pd.DataFrame,
+    stock_code: str,
+    quote_data: dict,
+) -> None:
+    """추천 카드 안에 최근 일봉과 현재가 기준선을 간단히 표시한다."""
+    stock_chart = get_stock_chart_df(chart_df, stock_code).tail(20).copy()
+    if stock_chart.empty or "종가" not in stock_chart.columns:
+        container.caption("표시할 일봉 데이터가 없습니다.")
+        return
+
+    for column in ["시가", "고가", "저가", "종가"]:
+        if column in stock_chart.columns:
+            stock_chart[column] = pd.to_numeric(stock_chart[column], errors="coerce")
+
+    price = safe_float(quote_data.get("price"))
+    opening_price = safe_float(quote_data.get("open"))
+    if not opening_price and "시가" in stock_chart.columns:
+        opening_price = safe_float(stock_chart["시가"].iloc[-1])
+
+    is_up_from_open = price >= opening_price if price and opening_price else True
+    price_color = "#EF4444" if is_up_from_open else "#2563EB"
+    has_ohlc = {"시가", "고가", "저가", "종가"}.issubset(stock_chart.columns)
+
+    if has_ohlc:
+        figure = go.Figure(
+            data=[
+                go.Candlestick(
+                    x=stock_chart["날짜"],
+                    open=stock_chart["시가"],
+                    high=stock_chart["고가"],
+                    low=stock_chart["저가"],
+                    close=stock_chart["종가"],
+                    increasing_line_color="#EF4444",
+                    increasing_fillcolor="#EF4444",
+                    decreasing_line_color="#2563EB",
+                    decreasing_fillcolor="#2563EB",
+                    name="일봉",
+                )
+            ]
+        )
+    else:
+        figure = go.Figure(
+            data=[
+                go.Scatter(
+                    x=stock_chart["날짜"],
+                    y=stock_chart["종가"],
+                    mode="lines",
+                    line={"color": "#94A3B8", "width": 2},
+                    name="종가",
+                )
+            ]
+        )
+
+    if price:
+        figure.add_hline(
+            y=price,
+            line_color=price_color,
+            line_width=2,
+            line_dash="dot",
+            annotation_text=f"현재 {price:,.0f}원",
+            annotation_font_color=price_color,
+            annotation_position="top right",
+        )
+
+    is_dark_theme = st.session_state.get("dashboard_theme", "화이트") == "다크"
+    figure.update_layout(
+        height=220,
+        margin={"l": 4, "r": 4, "t": 18, "b": 4},
+        showlegend=False,
+        template="plotly_dark" if is_dark_theme else "plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"size": 10},
+        xaxis={"rangeslider": {"visible": False}, "showgrid": False},
+        yaxis={"tickformat": ",.0f", "showgrid": True, "gridcolor": "#334155"},
+    )
+    container.plotly_chart(
+        figure,
+        use_container_width=True,
+        config={"displayModeBar": False},
+    )
+
+    if price and opening_price:
+        opening_rate = ((price / opening_price) - 1) * 100
+        direction = "시가 대비 상승" if opening_rate >= 0 else "시가 대비 하락"
+        container.caption(f"{direction} {opening_rate:+.2f}% · 빨강=상승 / 파랑=하락")
 
 
 @st.fragment(run_every="1s")
@@ -2894,8 +2987,9 @@ def show_realtime_recommendations(
             realtime_status = "KIS WebSocket 연결 중"
         st_autorefresh(interval=1000, key="realtime_recommendation_refresh")
 
-    if not quotes:
-        quotes = load_recommendation_quotes(codes)
+    # WebSocket은 체결가 중심이고 시가 정보가 없으므로, REST 현재가의 시가를
+    # 함께 사용해 카드 차트의 빨강/파랑 기준을 정확히 표시한다.
+    rest_quotes = load_recommendation_quotes(codes)
 
     st.subheader("매수 가능 TOP 3" if has_buyable_top3 else "현재 관찰 후보 TOP 3")
     if not has_buyable_top3:
@@ -2905,7 +2999,10 @@ def show_realtime_recommendations(
     for index, (_, row) in enumerate(top3.iterrows()):
         code = clean_code(row.get("종목코드", ""))
         name = str(row.get("종목명", code))
-        quote_data = quotes.get(code, {})
+        quote_data = {
+            **rest_quotes.get(code, {}),
+            **quotes.get(code, {}),
+        }
         price = quote_data.get("price", 0)
         change = quote_data.get("change", 0)
         change_rate = quote_data.get("change_rate", 0)
@@ -2919,6 +3016,12 @@ def show_realtime_recommendations(
 
         columns[index].markdown(f"**{index + 1}. {name}**")
         columns[index].metric("현재가", value, delta)
+        show_recommendation_mini_chart(
+            columns[index],
+            chart_df,
+            code,
+            quote_data,
+        )
         recommendation = str(row.get("최종추천", "추천 검토"))
         has_chase_risk = "추격위험도" in row.index and pd.notna(row.get("추격위험도"))
         chase_risk = safe_float(row.get("추격위험도"))
