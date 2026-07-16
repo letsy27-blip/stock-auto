@@ -572,6 +572,19 @@ def _news_lookup(
         "뉴스신뢰도": int(_safe_float(row.get("신뢰도"), 0)),
     }
 
+def _financial_lookup(financial_df: pd.DataFrame | None, stock_code: str) -> dict[str, Any]:
+    default = {"재무점수": 0.0, "재무등급": "평가 제외", "재무사유": "재무 데이터 없음", "재무기준일": ""}
+    if financial_df is None or financial_df.empty or "종목코드" not in financial_df.columns:
+        return default
+    data = financial_df.copy()
+    data["종목코드"] = data["종목코드"].map(_clean_code)
+    hit = data[data["종목코드"] == _clean_code(stock_code)]
+    if hit.empty:
+        return default
+    row = hit.iloc[-1]
+    return {"재무점수": round(_clip(_safe_float(row.get("재무점수")), -10.0, 10.0), 2), "재무등급": str(row.get("재무등급") or "평가 제외"), "재무사유": str(row.get("재무사유") or "재무 데이터 없음"), "재무기준일": str(row.get("재무기준일") or "")}
+
+
 def _extract_news_score(row: pd.Series) -> float:
     """
     ranking/news 단계에서 '뉴스점수'가 전달되면 -10~+10 범위로 사용한다.
@@ -715,6 +728,7 @@ def make_score_sheet(
     chart_history_df: pd.DataFrame | None = None,
     supply_demand_df: pd.DataFrame | None = None,
     news_summary_df: pd.DataFrame | None = None,
+    financial_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     score_map: dict[str, dict[str, Any]] = {}
 
@@ -774,6 +788,7 @@ def make_score_sheet(
         metrics = _calc_technical_metrics(chart_history_df, code)
         supply = _calc_supply_metrics(supply_demand_df, code)
         news_info = _news_lookup(news_summary_df, code)
+        financial = _financial_lookup(financial_df, code)
         chase_risk, risk_level, risk_reason = _calc_chase_risk(metrics)
 
         # 급등주를 단순 순위 점수만으로 매수 후보로 올리지 않는다. 특히 거래량이
@@ -858,6 +873,7 @@ def make_score_sheet(
                 market_score
                 + supply_score
                 + news_score
+                + financial["재무점수"]
                 + metrics["진입타이밍점수"]
                 + entry_penalty,
                 FINAL_SCORE_MIN,
@@ -915,6 +931,10 @@ def make_score_sheet(
             "외국인연속순매수일": supply["외국인연속순매수일"],
             "기관연속순매수일": supply["기관연속순매수일"],
             "뉴스점수": news_score,
+            "재무점수": financial["재무점수"],
+            "재무등급": financial["재무등급"],
+            "재무사유": financial["재무사유"],
+            "재무기준일": financial["재무기준일"],
             "뉴스분석사유": news_info["뉴스분석사유"],
             "뉴스건수": news_info["뉴스건수"],
             "뉴스평가상태": news_info["뉴스평가상태"],

@@ -6,6 +6,7 @@ import pandas as pd
 
 from database import save_all_data
 from excel_writer import save_to_excel
+from financial_analyzer import collect_financial_metrics
 from kis_api import (
     collect_investor_trends,
     get_access_token,
@@ -251,6 +252,11 @@ def run_once():
         )
     )
 
+    financial_df = collect_financial_metrics(candidate_df)
+    if not financial_df.empty:
+        evaluated = int((financial_df.get("재무등급") != "평가 제외").sum())
+        print(f"재무제표 반영: {evaluated}개 / 후보 {len(financial_df)}개")
+
     scored_df = make_score_sheet(
         volume_rank_df=volume_rank_df,
         rise_rank_df=rise_rank_df,
@@ -258,6 +264,7 @@ def run_once():
         chart_history_df=chart_history_df,
         supply_demand_df=supply_demand_df,
         news_summary_df=news_summary_df,
+        financial_df=financial_df,
     )
 
     classification_df = update_stock_classifications(
@@ -298,6 +305,7 @@ def run_once():
         chart_history_df=chart_history_df,
         supply_demand_df=supply_demand_df,
         news_history_df=news_history_df,
+        financial_df=financial_df,
     )
 
     prediction_saved, prediction_evaluated = update_prediction_tracking(

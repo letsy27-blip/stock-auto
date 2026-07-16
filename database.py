@@ -324,6 +324,7 @@ def save_all_data(
     chart_history_df: pd.DataFrame | None = None,
     supply_demand_df: pd.DataFrame | None = None,
     news_history_df: pd.DataFrame | None = None,
+    financial_df: pd.DataFrame | None = None,
 ) -> None:
     datasets = [
         ("portfolio", portfolio_df),
@@ -335,6 +336,7 @@ def save_all_data(
         ("chart_history", chart_history_df),
         ("supply_demand", supply_demand_df),
         ("news_history", news_history_df),
+        ("financial", financial_df),
     ]
 
     conn = _connect()
