@@ -21,9 +21,11 @@ from market_data import get_market_overview
 from realtime_quotes import get_realtime_quote_hub
 from paper_trading import (
     get_account as get_paper_account,
+    get_investor_profile,
     get_orders as get_paper_orders,
     get_positions as get_paper_positions,
     place_order as place_paper_order,
+    record_behavior_event,
     reset_account as reset_paper_account,
 )
 from prediction_tracker import get_prediction_summary
@@ -2484,6 +2486,15 @@ def show_stock_search(
     selected_code = selected.split("(")[1].split(")")[0]
     selected_name = selected.split(" (")[0]
 
+    profile_event_key = f"{keyword.strip()}::{clean_code(selected_code)}"
+    if st.session_state.get("last_profile_search_event") != profile_event_key:
+        selected_score = score_df[score_df["종목코드"] == clean_code(selected_code)].copy()
+        chase_risk = 0.0
+        if not selected_score.empty and "추격위험도" in selected_score.columns:
+            chase_risk = safe_float(selected_score.iloc[-1].get("추격위험도", 0))
+        record_behavior_event("search", selected_code, selected_name, {"chase_risk": chase_risk})
+        st.session_state["last_profile_search_event"] = profile_event_key
+
     show_stock_detail_by_code(
         score_df=score_df,
         chart_df=chart_df,
@@ -3035,6 +3046,12 @@ def show_realtime_recommendations(
                 "관찰 후보입니다. 돌파 확인과 추격 위험 조건을 통과하기 전에는 매수하지 않습니다."
             )
         if columns[index].button("상세 분석 보기", key=f"realtime_detail_{code}"):
+            record_behavior_event(
+                "view",
+                code,
+                name,
+                {"chase_risk": chase_risk, "recommendation": recommendation},
+            )
             detail_popup(name, code)
 
     if has_buyable_top3 and not watch3.empty:
@@ -3754,9 +3771,38 @@ def show_ai_analysis(score_df: pd.DataFrame, chart_df: pd.DataFrame, master_df: 
     )
 
 
+def show_investor_profile():
+    profile = get_investor_profile(days=30)
+    st.header("투자 성향")
+    st.caption("최근 30일의 검색·열람·모의 주문 기록을 바탕으로 본인 행동을 점검합니다. 투자 적합성 판정이나 매수 추천은 아닙니다.")
+    st.subheader(profile["profile"])
+    st.write(profile["summary"])
+    columns = st.columns(5)
+    columns[0].metric("행동 기록", f"{profile['total_actions']}건")
+    columns[1].metric("종목 검색·열람", f"{profile['searches'] + profile['views']}건")
+    columns[2].metric("모의 매수", f"{profile['buys']}건")
+    columns[3].metric("모의 매도", f"{profile['sells']}건")
+    risk_ratio = profile["high_risk_ratio"]
+    columns[4].metric("고위험 후보 열람", f"{risk_ratio:.0f}%" if risk_ratio is not None else "집계 대기")
+    st.subheader("조심 알림")
+    if profile["warnings"]:
+        for warning in profile["warnings"]:
+            st.warning(warning)
+    else:
+        st.success("현재 기록에서는 반복적 충동 진입 신호가 뚜렷하지 않습니다.")
+    st.subheader("자주 보는 종목")
+    if profile["favorites"].empty:
+        st.info("종목 검색이나 모의 주문을 기록하면 관심 종목 패턴이 표시됩니다.")
+    else:
+        st.dataframe(profile["favorites"], use_container_width=True, hide_index=True)
+
+
 def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"):
     st.header("모의투자")
     st.caption("실제 주문은 전송되지 않습니다. 초기 자금 1억 원, 매수·매도 수수료와 매도세가 반영됩니다.")
+    if section == "투자 성향":
+        show_investor_profile()
+        return
     order_confirmation = st.session_state.pop("paper_order_confirmation", None)
     if order_confirmation:
         st.success(order_confirmation)
@@ -4468,13 +4514,14 @@ def main():
     sidebar_page_button("모의 주문", "모의 주문", "nav_paper_order")
     sidebar_page_button("보유 종목", "보유 종목", "nav_paper_positions")
     sidebar_page_button("거래 내역", "거래 내역", "nav_paper_history")
+    sidebar_page_button("투자 성향", "투자 성향", "nav_investor_profile")
 
     st.sidebar.markdown("## ⚙️ 관리")
     sidebar_page_button("DB 상태", "DB 상태", "nav_db")
 
     menu = st.session_state["active_dashboard_page"]
 
-    if menu in {"모의 주문", "보유 종목", "거래 내역"}:
+    if menu in {"모의 주문", "보유 종목", "거래 내역", "투자 성향"}:
         show_paper_trading(
             master_df=master_df,
             current_df=current_df,

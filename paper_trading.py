@@ -1,5 +1,6 @@
+import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -50,6 +51,14 @@ def initialize_paper_account():
                 amount REAL NOT NULL,
                 realized_profit REAL NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS investor_behavior_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                occurred_at TEXT NOT NULL,
+                event_type TEXT NOT NULL CHECK (event_type IN ('search', 'view', 'BUY', 'SELL')),
+                stock_code TEXT,
+                stock_name TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
             """
         )
         connection.execute(
@@ -57,6 +66,63 @@ def initialize_paper_account():
             "VALUES (1, ?, ?, ?)",
             (INITIAL_CASH, INITIAL_CASH, datetime.now().isoformat(timespec="seconds")),
         )
+
+
+def record_behavior_event(event_type: str, stock_code: str = "", stock_name: str = "", metadata: dict | None = None) -> None:
+    """개인 로컬 모의투자 행동을 저장한다. 실제 주문이나 외부 전송은 하지 않는다."""
+    initialize_paper_account()
+    event_type = str(event_type).upper()
+    if event_type not in {"SEARCH", "VIEW", "BUY", "SELL"}:
+        raise ValueError("지원하지 않는 행동 기록입니다.")
+    normalized_type = event_type.lower() if event_type in {"SEARCH", "VIEW"} else event_type
+    with _connect() as connection:
+        connection.execute(
+            "INSERT INTO investor_behavior_events (occurred_at, event_type, stock_code, stock_name, metadata_json) VALUES (?, ?, ?, ?, ?)",
+            (datetime.now().isoformat(timespec="seconds"), normalized_type, str(stock_code or "").replace(".0", "").zfill(6) if stock_code else "", str(stock_name or "").strip(), json.dumps(metadata or {}, ensure_ascii=False)),
+        )
+
+
+def get_investor_profile(days: int = 30) -> dict:
+    """최근 행동을 바탕으로 성향과 충동 진입 경고를 계산한다."""
+    initialize_paper_account()
+    since = (datetime.now() - timedelta(days=max(1, int(days)))).isoformat(timespec="seconds")
+    with _connect() as connection:
+        events = pd.read_sql_query("SELECT * FROM investor_behavior_events WHERE occurred_at >= ? ORDER BY occurred_at", connection, params=(since,))
+    default = {"profile": "분석 중", "summary": "아직 행동 표본이 적습니다. 종목을 검색하고 모의 주문을 기록하면 성향이 표시됩니다.", "warnings": [], "total_actions": 0, "searches": 0, "views": 0, "buys": 0, "sells": 0, "high_risk_ratio": None, "rapid_entry_count": 0, "favorites": pd.DataFrame(columns=["종목코드", "종목명", "열람·검색", "매수", "매도"])}
+    if events.empty:
+        return default
+    events["occurred_at"] = pd.to_datetime(events["occurred_at"], errors="coerce")
+    events["metadata"] = events["metadata_json"].map(lambda value: json.loads(value) if value else {})
+    events["chase_risk"] = events["metadata"].map(lambda value: float(value.get("chase_risk", 0) or 0))
+    counts = events["event_type"].value_counts()
+    searches, views, buys, sells = (int(counts.get(key, 0)) for key in ("search", "view", "BUY", "SELL"))
+    risk_samples = events[events["event_type"].isin(["search", "view"])]
+    high_risk_ratio = float((risk_samples["chase_risk"] >= 45).mean() * 100) if not risk_samples.empty else None
+    rapid_entry_count = 0
+    for _, buy in events[events["event_type"] == "BUY"].iterrows():
+        prior = events[(events["stock_code"] == buy["stock_code"]) & (events["event_type"].isin(["search", "view"])) & (events["occurred_at"] <= buy["occurred_at"])]
+        if not prior.empty and 0 <= (buy["occurred_at"] - prior["occurred_at"].iloc[-1]).total_seconds() / 60 <= 10:
+            rapid_entry_count += 1
+    activity = events.groupby(["stock_code", "stock_name", "event_type"]).size().unstack(fill_value=0)
+    values = lambda key: activity[key].to_numpy() if key in activity.columns else [0] * len(activity)
+    favorites = pd.DataFrame({"종목코드": activity.index.get_level_values("stock_code"), "종목명": activity.index.get_level_values("stock_name"), "열람·검색": values("search") + values("view"), "매수": values("BUY"), "매도": values("SELL")})
+    favorites = favorites[favorites["종목코드"] != ""].sort_values(["열람·검색", "매수"], ascending=False).head(5)
+    warnings = []
+    if rapid_entry_count >= 2:
+        warnings.append(f"검색·열람 후 10분 안에 모의 매수한 경우가 {rapid_entry_count}건입니다. 주문 전 10분 대기 규칙을 권장합니다.")
+    if high_risk_ratio is not None and high_risk_ratio >= 40:
+        warnings.append(f"열람한 종목 중 추격위험 45점 이상 비중이 {high_risk_ratio:.0f}%입니다. 급등주 진입 전 돌파 확인을 기다리세요.")
+    if buys >= 8 and buys > sells * 2:
+        warnings.append("매수 횟수가 매도보다 많습니다. 새 진입 전 보유 종목과 손절 기준을 먼저 점검하세요.")
+    if len(events) < 8:
+        profile, summary = "분석 중", "표본이 아직 적습니다. 행동 8건부터 성향을 더 신뢰도 있게 분류합니다."
+    elif (high_risk_ratio is not None and high_risk_ratio >= 40) or rapid_entry_count >= 2:
+        profile, summary = "공격 성향", "고변동성 후보 열람 또는 빠른 진입이 상대적으로 많습니다. 수익 기회와 함께 추격 위험 관리가 중요합니다."
+    elif (high_risk_ratio is None or high_risk_ratio < 20) and buys <= max(1, searches // 3):
+        profile, summary = "안정 성향", "진입 전 탐색 비중이 높고 고위험 후보 집중도가 낮습니다. 다만 관망만 길어지지 않도록 진입 기준을 정해 두세요."
+    else:
+        profile, summary = "균형 성향", "탐색과 진입의 비중이 비교적 균형적입니다. 현재의 손절·분할매수 원칙을 유지하세요."
+    return {"profile": profile, "summary": summary, "warnings": warnings, "total_actions": len(events), "searches": searches, "views": views, "buys": buys, "sells": sells, "high_risk_ratio": high_risk_ratio, "rapid_entry_count": rapid_entry_count, "favorites": favorites}
 
 
 def get_account():
@@ -148,6 +214,10 @@ def place_order(side, stock_code, stock_name, quantity, price):
             "INSERT INTO paper_orders(ordered_at, side, stock_code, stock_name, quantity, "
             "price, fee, tax, amount, realized_profit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (now, side, stock_code, stock_name, quantity, price, fee, tax, amount, realized_profit),
+        )
+        connection.execute(
+            "INSERT INTO investor_behavior_events (occurred_at, event_type, stock_code, stock_name, metadata_json) VALUES (?, ?, ?, ?, ?)",
+            (now, side, stock_code, stock_name, json.dumps({"quantity": quantity, "price": price}, ensure_ascii=False)),
         )
     return {"side": side, "amount": amount, "fee": fee, "tax": tax}
 
