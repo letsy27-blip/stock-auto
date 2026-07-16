@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -61,6 +62,41 @@ def initialize_prediction_tracking() -> None:
                 PRIMARY KEY (prediction_date, stock_code)
             )
             """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS learning_cases (
+                case_key TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                stock_name TEXT NOT NULL,
+                prediction_date TEXT NOT NULL,
+                recommendation TEXT,
+                entry_price REAL,
+                observed_price REAL,
+                return_rate REAL,
+                expected_reason TEXT,
+                outcome_reason TEXT,
+                review_status TEXT NOT NULL,
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+
+def record_learning_case(*, case_key: str, stock_code: str, stock_name: str, prediction_date: str, recommendation: str, entry_price: float, observed_price: float | None, return_rate: float | None, expected_reason: str, outcome_reason: str, review_status: str, evidence: dict | None = None) -> None:
+    """예측과 실제 결과의 차이를 향후 규칙 검증용 사례로 남긴다."""
+    initialize_prediction_tracking()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO learning_cases (case_key, created_at, stock_code, stock_name, prediction_date, recommendation, entry_price, observed_price, return_rate, expected_reason, outcome_reason, review_status, evidence_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(case_key) DO UPDATE SET observed_price=excluded.observed_price, return_rate=excluded.return_rate, outcome_reason=excluded.outcome_reason, review_status=excluded.review_status, evidence_json=excluded.evidence_json, updated_at=excluded.updated_at
+            """,
+            (case_key, now, _clean_code(stock_code), stock_name, prediction_date, recommendation, entry_price, observed_price, return_rate, expected_reason, outcome_reason, review_status, json.dumps(evidence or {}, ensure_ascii=False), now),
         )
 
 
