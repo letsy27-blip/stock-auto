@@ -98,7 +98,10 @@ def record_behavior_event(event_type: str, stock_code: str = "", stock_name: str
     if is_remote_storage_enabled():
         # 공개 분석은 비로그인 상태에서도 볼 수 있으나, 개인 행동은 기록하지 않는다.
         if is_paper_user_authenticated():
-            cloud_paper.record_behavior_event(event_type, stock_code, stock_name, metadata)
+            try:
+                cloud_paper.record_behavior_event(event_type, stock_code, stock_name, metadata)
+            except RuntimeError:
+                pass
         return
     initialize_paper_account()
     event_type = str(event_type).upper()

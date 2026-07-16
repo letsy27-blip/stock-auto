@@ -115,6 +115,7 @@ def record_behavior_event(event_type: str, stock_code: str = "", stock_name: str
         "POST",
         "/rest/v1/investor_behavior_events",
         body={
+            "user_id": str(current_user().get("id")),
             "event_type": normalized.lower() if normalized in {"SEARCH", "VIEW"} else normalized,
             "stock_code": str(stock_code or "").replace(".0", "").zfill(6) if stock_code else "",
             "stock_name": str(stock_name or "").strip(),
