@@ -129,7 +129,7 @@ def sync_database_from_github() -> None:
         # 네트워크 문제여도 기존 DB로 대시보드는 계속 표시한다.
         st.session_state["db_sync_message"] = f"DB 동기화 보류: {exc}"
 
-st.set_page_config(page_title="HONGSTOCK | 이유를 기록하는 주식 분석", layout="wide")
+st.set_page_config(page_title="HONG STOCK | 이유를 기록하는 주식 분석", layout="wide")
 
 st.markdown(
     """
@@ -148,99 +148,122 @@ st.markdown(
     .hongstock-welcome-note {
         position: relative;
         overflow: hidden;
-        padding: 30px 32px 24px;
-        border: 1px solid #E7D7B0;
-        border-radius: 18px;
-        color: #3E3324;
+        padding: 42px 46px 32px;
+        border: 1px solid #D7BE91;
+        border-radius: 4px;
+        color: #35291B;
         background:
             repeating-linear-gradient(
                 0deg,
-                rgba(130, 103, 57, 0.075) 0px,
-                rgba(130, 103, 57, 0.075) 1px,
+                rgba(132, 100, 50, 0.07) 0px,
+                rgba(132, 100, 50, 0.07) 1px,
                 transparent 1px,
-                transparent 30px
+                transparent 32px
             ),
-            linear-gradient(135deg, #FFFDF5 0%, #F9EBCB 100%);
-        box-shadow: 0 12px 28px rgba(73, 55, 25, 0.14);
-        transform: rotate(-0.15deg);
+            linear-gradient(135deg, #FFFDF4 0%, #F4E2B8 100%);
+        box-shadow: 0 15px 34px rgba(69, 48, 16, 0.18);
     }
 
     .hongstock-welcome-note::before {
-        content: "HONGSTOCK NOTE";
+        content: "";
         position: absolute;
-        top: 13px;
-        right: 20px;
-        color: #9A7B44;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.12em;
+        width: 130px;
+        height: 28px;
+        top: -12px;
+        left: calc(50% - 65px);
+        background: rgba(198, 168, 111, 0.48);
+        transform: rotate(-2deg);
     }
 
-    .hongstock-welcome-kicker {
-        color: #9A6D27;
-        font-size: 13px;
+    .hongstock-welcome-meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        color: #896735;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 12px;
         font-weight: 800;
-        letter-spacing: 0.08em;
-        margin-bottom: 10px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
     }
 
     .hongstock-welcome-title {
-        margin: 0 0 12px;
-        color: #342719;
-        font-size: clamp(26px, 3vw, 40px);
+        margin: 25px 0 14px;
+        color: #302213;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: clamp(31px, 4vw, 49px);
         font-weight: 800;
-        line-height: 1.2;
+        line-height: 1.08;
         letter-spacing: -0.04em;
     }
 
     .hongstock-welcome-copy {
-        max-width: 760px;
+        max-width: 680px;
         margin: 0;
-        color: #5B4A32;
+        color: #59472D;
         font-size: 16px;
-        line-height: 1.75;
+        line-height: 1.8;
     }
 
-    .hongstock-welcome-promise {
+    .hongstock-welcome-principles {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 12px;
-        margin-top: 24px;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0;
+        margin-top: 30px;
+        border-top: 1px solid rgba(109, 79, 37, 0.35);
+        border-bottom: 1px solid rgba(109, 79, 37, 0.35);
     }
 
-    .hongstock-welcome-promise > div {
-        padding: 14px;
-        border: 1px solid rgba(138, 105, 51, 0.28);
-        border-radius: 12px;
-        background: rgba(255, 253, 245, 0.7);
+    .hongstock-welcome-principles > div {
+        padding: 17px 18px 18px;
     }
 
-    .hongstock-welcome-promise strong {
+    .hongstock-welcome-principles > div + div {
+        border-left: 1px solid rgba(109, 79, 37, 0.35);
+    }
+
+    .hongstock-welcome-principles em {
+        display: block;
+        margin-bottom: 9px;
+        color: #B05036;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 13px;
+        font-style: normal;
+        font-weight: 800;
+    }
+
+    .hongstock-welcome-principles strong {
         display: block;
         margin-bottom: 5px;
-        color: #6E4A16;
-        font-size: 14px;
+        color: #46321B;
+        font-size: 15px;
     }
 
-    .hongstock-welcome-promise span {
-        color: #66553C;
+    .hongstock-welcome-principles span {
+        color: #665035;
         font-size: 13px;
         line-height: 1.5;
     }
 
-    .hongstock-welcome-flow {
+    .hongstock-welcome-signature {
         margin-top: 22px;
-        padding-top: 17px;
-        border-top: 1px dashed rgba(112, 80, 31, 0.45);
-        color: #765823;
+        color: #73562A;
+        font-family: Georgia, "Times New Roman", serif;
         font-size: 14px;
         font-weight: 700;
-        text-align: center;
+        letter-spacing: 0.02em;
+    }
+
+    .hongstock-welcome-signature b {
+        color: #B05036;
+        font-size: 18px;
     }
 
     @media (max-width: 700px) {
-        .hongstock-welcome-note { padding: 25px 20px 20px; }
-        .hongstock-welcome-promise { grid-template-columns: 1fr; }
+        .hongstock-welcome-note { padding: 34px 22px 24px; }
+        .hongstock-welcome-principles { grid-template-columns: 1fr; }
+        .hongstock-welcome-principles > div + div { border-left: 0; border-top: 1px solid rgba(109, 79, 37, 0.35); }
     }
 
     .metric-card {
@@ -4477,28 +4500,28 @@ def show_hongstock_welcome() -> bool:
     def dismiss_welcome():
         st.session_state["hongstock_welcome_seen"] = True
 
-    @st.dialog("Welcome to HONGSTOCK", width="large", on_dismiss=dismiss_welcome)
+    @st.dialog("Welcome to HONG STOCK", width="large", on_dismiss=dismiss_welcome)
     def welcome_dialog():
         st.markdown(
             """
             <section class="hongstock-welcome-note">
-                <div class="hongstock-welcome-kicker">✦ 기록하는 투자 습관</div>
-                <h1 class="hongstock-welcome-title">HONGSTOCK은 종목을 찍지 않습니다.</h1>
+                <div class="hongstock-welcome-meta"><span>Investment note · 01</span><span>HONG STOCK</span></div>
+                <h1 class="hongstock-welcome-title">종목보다 먼저,<br>“왜”를 남깁니다.</h1>
                 <p class="hongstock-welcome-copy">
-                    주식에서 모든 예측이 맞을 수는 없습니다. 그래서 HONGSTOCK은<br>
-                    <b>무엇을 추천했는지보다 왜 그렇게 판단했는지</b>를 먼저 남깁니다.
+                    예측은 언제든 빗나갈 수 있습니다. HONG STOCK은 그 순간을 숨기지 않습니다.<br>
+                    추천의 근거와 실제 결과를 나란히 기록해, 다음 판단이 더 단단해지도록 만듭니다.
                 </p>
-                <div class="hongstock-welcome-promise">
-                    <div><strong>01. 근거 공개</strong><span>추천에 사용한 가격·수급·뉴스·위험 신호를 함께 보여줍니다.</span></div>
-                    <div><strong>02. 결과 검증</strong><span>추천 뒤 1·5·20일의 실제 결과를 다시 확인합니다.</span></div>
-                    <div><strong>03. 누적 개선</strong><span>맞고 틀린 이유를 기록해 다음 판단의 재료로 남깁니다.</span></div>
+                <div class="hongstock-welcome-principles">
+                    <div><em>01 / EVIDENCE</em><strong>근거를 먼저 봅니다</strong><span>가격·수급·뉴스·위험 신호를 함께 확인합니다.</span></div>
+                    <div><em>02 / REVIEW</em><strong>결과를 다시 봅니다</strong><span>추천 뒤 1·5·20일의 실제 흐름을 검증합니다.</span></div>
+                    <div><em>03 / LEARN</em><strong>이유를 남깁니다</strong><span>맞고 틀린 이유를 다음 판단의 재료로 쌓습니다.</span></div>
                 </div>
-                <div class="hongstock-welcome-flow">데이터 → 근거 있는 판단 → 실제 결과 검증 → 이유 기록 → 누적 개선</div>
+                <div class="hongstock-welcome-signature"><b>HONG STOCK</b> · 기록이 쌓일수록, 판단은 더 선명해집니다.</div>
             </section>
             """,
             unsafe_allow_html=True,
         )
-        st.caption("HONGSTOCK은 투자 판단의 보조 정보와 모의투자 도구입니다. 실제 투자 손익의 책임은 사용자에게 있습니다.")
+        st.caption("HONG STOCK은 투자 판단의 보조 정보와 모의투자 도구입니다. 실제 투자 손익의 책임은 사용자에게 있습니다.")
         if st.button("근거부터 확인하기", type="primary", use_container_width=True):
             st.session_state["hongstock_welcome_seen"] = True
             st.rerun()
@@ -4510,7 +4533,7 @@ def show_hongstock_welcome() -> bool:
 # 메인
 # -----------------------------
 def main():
-    st.title("HONGSTOCK")
+    st.title("HONG STOCK")
     st.caption("추천보다 이유를 기록하는 주식 분석")
 
     if show_hongstock_welcome():
