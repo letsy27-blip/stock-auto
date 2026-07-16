@@ -32,18 +32,51 @@ jobs:
       - name: Check whether positions exist
         id: positions
         shell: bash
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           count=$(python <<'PY'
+          import json
+          import os
           import sqlite3
+          import sys
+          import urllib.parse
+          import urllib.request
 
-          connection = sqlite3.connect("stock_data.db")
-          exists = connection.execute(
-              "SELECT COUNT(*) FROM sqlite_master "
-              "WHERE type='table' AND name='auto_strategy_positions'"
-          ).fetchone()[0]
-          count = connection.execute(
-              "SELECT COUNT(*) FROM auto_strategy_positions"
-          ).fetchone()[0] if exists else 0
+          count = None
+          url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+          key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+          if url and key:
+              try:
+                  query = urllib.parse.urlencode({
+                      "key": "eq.auto_strategy_state",
+                      "select": "value",
+                      "limit": "1",
+                  })
+                  request = urllib.request.Request(
+                      f"{url}/rest/v1/hongstock_state?{query}",
+                      headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                  )
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      rows = json.load(response)
+                  records = (((rows[0] if rows else {}).get("value") or {})
+                             .get("tables") or {}).get("auto_strategy_positions")
+                  if records is not None:
+                      count = len(records)
+              except Exception as exc:
+                  print(f"Central position check failed; using repository snapshot: {exc}",
+                        file=sys.stderr)
+
+          if count is None:
+              connection = sqlite3.connect("stock_data.db")
+              exists = connection.execute(
+                  "SELECT COUNT(*) FROM sqlite_master "
+                  "WHERE type='table' AND name='auto_strategy_positions'"
+              ).fetchone()[0]
+              count = connection.execute(
+                  "SELECT COUNT(*) FROM auto_strategy_positions"
+              ).fetchone()[0] if exists else 0
           print(count)
           PY
           )
