@@ -25,6 +25,7 @@ jobs:
       KIS_ACCOUNT_NO: ${{ secrets.KIS_ACCOUNT_NO }}
       KIS_ACCOUNT_CODE: ${{ secrets.KIS_ACCOUNT_CODE }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      OPENDART_API_KEY: ${{ secrets.OPENDART_API_KEY }}
       GEMINI_MODEL: gemini-2.5-flash
       # 무료 한도를 보호한다. 핵심 후보만 Gemini로 정밀 평가하고 나머지는 로컬 1차 분석을 쓴다.
       GEMINI_MAX_CALLS_PER_RUN: "8"
