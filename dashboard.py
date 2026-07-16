@@ -2939,6 +2939,32 @@ def _show_strength_chart(
     fig.update_layout(
         xaxis_title="강도",
         yaxis_title="",
+        template=(
+            "plotly_dark"
+            if st.session_state.get("dashboard_theme", "화이트") == "다크"
+            else "plotly_white"
+        ),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={
+            "color": (
+                "#E5E7EB"
+                if st.session_state.get("dashboard_theme", "화이트") == "다크"
+                else "#111827"
+            )
+        },
+        xaxis={
+            "gridcolor": (
+                "#374151"
+                if st.session_state.get("dashboard_theme", "화이트") == "다크"
+                else "#E5E7EB"
+            ),
+            "zerolinecolor": (
+                "#4B5563"
+                if st.session_state.get("dashboard_theme", "화이트") == "다크"
+                else "#D1D5DB"
+            ),
+        },
     )
     st.plotly_chart(
         fig,
