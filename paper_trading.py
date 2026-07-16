@@ -66,6 +66,16 @@ def initialize_paper_account():
             "VALUES (1, ?, ?, ?)",
             (INITIAL_CASH, INITIAL_CASH, datetime.now().isoformat(timespec="seconds")),
         )
+        # 기능 추가 전의 모의 주문도 성향 분석의 시작 표본으로 한 번만 옮긴다.
+        connection.execute(
+            "INSERT INTO investor_behavior_events "
+            "(occurred_at, event_type, stock_code, stock_name, metadata_json) "
+            "SELECT o.ordered_at, o.side, o.stock_code, o.stock_name, '{}' "
+            "FROM paper_orders o WHERE NOT EXISTS ("
+            "SELECT 1 FROM investor_behavior_events e "
+            "WHERE e.occurred_at = o.ordered_at AND e.event_type = o.side "
+            "AND e.stock_code = o.stock_code)"
+        )
 
 
 def record_behavior_event(event_type: str, stock_code: str = "", stock_name: str = "", metadata: dict | None = None) -> None:
@@ -104,7 +114,7 @@ def get_investor_profile(days: int = 30) -> dict:
         if not prior.empty and 0 <= (buy["occurred_at"] - prior["occurred_at"].iloc[-1]).total_seconds() / 60 <= 10:
             rapid_entry_count += 1
     activity = events.groupby(["stock_code", "stock_name", "event_type"]).size().unstack(fill_value=0)
-    values = lambda key: activity[key].to_numpy() if key in activity.columns else [0] * len(activity)
+    values = lambda key: activity[key].to_numpy() if key in activity.columns else pd.Series(0, index=activity.index).to_numpy()
     favorites = pd.DataFrame({"종목코드": activity.index.get_level_values("stock_code"), "종목명": activity.index.get_level_values("stock_name"), "열람·검색": values("search") + values("view"), "매수": values("BUY"), "매도": values("SELL")})
     favorites = favorites[favorites["종목코드"] != ""].sort_values(["열람·검색", "매수"], ascending=False).head(5)
     warnings = []
