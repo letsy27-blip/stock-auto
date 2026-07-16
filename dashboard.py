@@ -4381,18 +4381,21 @@ def show_hongstock_welcome() -> bool:
 
     @st.dialog("홍스탁에 오신 것을 환영합니다", width="large", on_dismiss=dismiss_welcome)
     def welcome_dialog():
-        st.markdown("## 추천보다 **왜**를 기록하는 주식 분석")
-        st.markdown("홍스탁은 단순히 종목을 보여주는 프로그램이 아닙니다. 추천이 나온 근거와 실제 결과의 차이를 계속 기록해, 다음 판단을 더 나아지게 만드는 것을 목표로 합니다.")
+        st.markdown("## 홍스탁은 종목을 찍지 않습니다.")
+        st.markdown(
+            "주식에서 모든 예측이 맞을 수는 없습니다. 그래서 홍스탁은 "
+            "**무엇을 추천했는지보다 왜 그렇게 판단했는지**를 먼저 남깁니다."
+        )
         left, right = st.columns(2)
         with left:
-            st.markdown("### 왜 만들었나요?")
-            st.markdown("- 올랐는지보다 **왜 올랐는지** 확인\n- 틀렸다면 **어떤 근거가 부족했는지** 기록\n- 충동적인 진입보다 근거 있는 판단 연습")
+            st.markdown("### 왜 홍스탁인가요?")
+            st.markdown("- 추천 근거를 숨기지 않습니다\n- 틀린 결과도 버리지 않고 기록합니다\n- 충동적인 진입 대신 판단 과정을 남깁니다")
         with right:
-            st.markdown("### 어떻게 판단하나요?")
-            st.markdown("- 가격·거래량·수급·뉴스를 함께 분석\n- 지지선·저항선·돌파 신뢰도·추격 위험 반영\n- 추천 뒤 1·5·20일 결과와 이유를 DB에 축적")
-        st.info("매수 가능 TOP3와 관찰 후보를 구분합니다. 한 사례만으로 규칙을 바꾸지 않고, 충분한 데이터가 쌓인 뒤 개선합니다.")
+            st.markdown("### 홍스탁의 약속")
+            st.markdown("- 매수 가능 후보와 관찰 후보를 구분\n- 추격 위험과 돌파 확인 여부를 함께 표시\n- 결과는 1·5·20일 뒤 다시 검증")
+        st.info("데이터 → 근거 있는 판단 → 실제 결과 검증 → 이유 기록 → 누적 개선. 한 번의 성공이나 실패가 아니라, 이 과정이 홍스탁의 핵심입니다.")
         st.caption("투자 판단의 보조 정보와 모의투자 도구입니다. 실제 투자 손익의 책임은 사용자에게 있습니다.")
-        if st.button("홍스탁 시작하기", type="primary", use_container_width=True):
+        if st.button("근거부터 확인하기", type="primary", use_container_width=True):
             st.session_state["hongstock_welcome_seen"] = True
             st.rerun()
 
