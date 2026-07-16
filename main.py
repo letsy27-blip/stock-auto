@@ -1,9 +1,16 @@
 import argparse
+import os
 import time
 from datetime import datetime, timedelta
 
 import pandas as pd
 
+from auto_strategy import DB_PATH as STRATEGY_DB_PATH, initialize_auto_strategies, update_auto_strategies
+from central_store import (
+    publish_latest_scores,
+    publish_strategy_state,
+    restore_strategy_state,
+)
 from database import save_all_data
 from excel_writer import save_to_excel
 from financial_analyzer import collect_financial_metrics
@@ -194,6 +201,13 @@ def make_chart_history_data(token, candidate_df, days=60):
 
 
 def run_once():
+    initialize_auto_strategies()
+    try:
+        restored = restore_strategy_state(STRATEGY_DB_PATH)
+        print("중앙 자동매매 상태 복원 완료" if restored else "중앙 자동매매 최초 실행 · 로컬 초기 상태 사용")
+    except Exception as exc:
+        print(f"중앙 자동매매 상태 복원 실패 · GitHub DB 상태 사용: {exc}")
+
     token = get_access_token()
     if not token:
         # 호출 측(GitHub Actions 포함)이 수집 실패를 정상 완료로 오해하지 않도록
@@ -308,9 +322,31 @@ def run_once():
         financial_df=financial_df,
     )
 
+    strategy_result = update_auto_strategies(
+        scored_df=scored_df,
+        chart_df=chart_history_df,
+    )
     prediction_saved, prediction_evaluated = update_prediction_tracking(
         scored_df=scored_df,
         chart_history_df=chart_history_df,
+    )
+    try:
+        strategy_time = publish_strategy_state(STRATEGY_DB_PATH)
+        print(f"중앙 자동매매 상태 저장 완료: {strategy_time}")
+    except Exception as exc:
+        print(f"중앙 자동매매 상태 저장 실패 · GitHub DB 커밋으로 보존: {exc}")
+    try:
+        central_time = publish_latest_scores(
+            scored_df,
+            source="github-actions" if os.getenv("GITHUB_ACTIONS") else "local-collector",
+        )
+        print(f"중앙 DB 갱신 완료: {central_time}")
+    except Exception as exc:
+        # 수집 데이터는 로컬에도 먼저 저장되어 있으므로 중앙 장애가 수집 자체를 망치지 않게 한다.
+        print(f"중앙 DB 갱신 건너뜀: {exc}")
+    print(
+        "자동전략 갱신: "
+        f"가상 매수 {strategy_result['opened']}건, 가상 청산 {strategy_result['closed']}건"
     )
     print(
         "예측 검증 갱신: "
@@ -330,7 +366,7 @@ def run_once():
 
 RUN_MINUTES = {0, 30}
 MARKET_START_HOUR = 9
-MARKET_END_HOUR = 23
+MARKET_END_HOUR = 15
 MARKET_END_MINUTE = 30
 
 
@@ -392,17 +428,18 @@ def run_once_safely() -> bool:
 
 def run_intraday_scheduler() -> None:
     """
-    실행 즉시 한 번 수집한 뒤,
-    평일 정규장 중 00분·30분마다 다시 실행한다.
+    평일 정규장 중 00분·30분마다 실행하고 장 종료 후에도
+    다음 거래일까지 대기한다.
     """
     print("30분 장중 분석기를 시작합니다.")
-    print("시작 즉시 한 번 실행한 뒤 평일 09:00~23:30 동안 30분마다 실행합니다.")
+    print("평일 09:00~15:30 동안 30분마다 실행합니다.")
     print("중지하려면 Ctrl+C를 누르세요.")
 
     now = datetime.now()
 
-    # 시작하자마자 즉시 한 번 실행
-    run_once_safely()
+    # 장중에 실행기를 열면 현재 자료를 즉시 한 번 갱신한다.
+    if is_market_time(now):
+        run_once_safely()
 
     # 정확히 정각/30분에 실행했다면 같은 슬롯에서 중복 실행 방지
     last_slot = (
@@ -411,19 +448,9 @@ def run_intraday_scheduler() -> None:
         else None
     )
 
-    # 장 시간이 아니면 한 번만 실행하고 종료
-    if not is_market_time(now):
-        print("현재 정규장 시간이 아니므로 즉시 실행 1회 후 종료합니다.")
-        return
-
     while True:
         now = datetime.now()
         slot = now.strftime("%Y-%m-%d %H:%M")
-
-        if not is_market_time(now):
-            print("")
-            print("정규장이 종료되어 장중 분석기를 종료합니다.")
-            return
 
         if is_scheduled_slot(now) and slot != last_slot:
             run_once_safely()

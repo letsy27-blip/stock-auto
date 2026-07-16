@@ -4,8 +4,10 @@ on:
   workflow_dispatch:
   schedule:
     # UTC 00:05/35~06:05/35 = 한국 시간 평일 09:05/35~15:05/35
+    # 15:35에는 장 마감 결과를 한 번 더 확정 저장한다.
     # 정각 혼잡을 피하면서 장중 30분 단위로 실행한다.
-    - cron: "5,35 0-14 * * 1-5"
+    - cron: "5,35 0-5 * * 1-5"
+    - cron: "5,35 6 * * 1-5"
 
 permissions:
   contents: write
@@ -26,6 +28,8 @@ jobs:
       KIS_ACCOUNT_CODE: ${{ secrets.KIS_ACCOUNT_CODE }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       OPENDART_API_KEY: ${{ secrets.OPENDART_API_KEY }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       GEMINI_MODEL: gemini-2.5-flash
       # 무료 한도를 보호한다. 핵심 후보만 Gemini로 정밀 평가하고 나머지는 로컬 1차 분석을 쓴다.
       GEMINI_MAX_CALLS_PER_RUN: "8"

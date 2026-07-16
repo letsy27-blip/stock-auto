@@ -1,11 +1,10 @@
 import os
 import re
 import json
+import html
 import sqlite3
 from datetime import date, datetime, timedelta
-from email.utils import parsedate_to_datetime
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from urllib.parse import quote
 
 import pandas as pd
@@ -15,6 +14,8 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
+from auto_strategy import get_strategy_performance, get_top3_signal_status
+from central_store import load_latest_scores
 from ai.gemini_client import DEFAULT_MODEL, stream_chat
 from kis_api import get_access_token, get_current_price
 from market_data import get_market_overview
@@ -30,12 +31,12 @@ from paper_trading import (
     record_behavior_event,
     reset_account as reset_paper_account,
 )
-from prediction_tracker import get_prediction_summary
 from sector_theme_strength import (
     make_industry_strength,
     make_theme_strength,
 )
 from supabase_auth import is_admin_user, show_auth_sidebar
+from strategy_backtest import run_walk_forward_backtest
 
 
 # 다크 모드에서 캔버스형 dataframe을 HTML 표로 대체할 때 원본 함수를 보관한다.
@@ -43,94 +44,6 @@ _NATIVE_DATAFRAME = st.dataframe
 
 DB_PATH = Path(__file__).resolve().with_name("stock_data.db")
 DB_NAME = str(DB_PATH)
-REMOTE_DB_URL = (
-    "https://raw.githubusercontent.com/letsy27-blip/stock-auto/"
-    "main/stock_data.db"
-)
-DB_SYNC_INTERVAL_SECONDS = 60
-
-
-def _is_valid_database(path: Path) -> bool:
-    conn = None
-    try:
-        conn = sqlite3.connect(path)
-        quick_check = conn.execute("PRAGMA quick_check").fetchone()[0]
-        has_score = conn.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type = 'table' AND name = 'score'"
-        ).fetchone()
-        return quick_check == "ok" and has_score is not None
-    except sqlite3.Error:
-        return False
-    finally:
-        if conn is not None:
-            conn.close()
-
-
-def sync_database_from_github() -> None:
-    """GitHub Actions가 갱신한 DB를 로컬/배포 대시보드에 반영한다."""
-    now = datetime.now().timestamp()
-    last_check = st.session_state.get("db_sync_last_check", 0.0)
-    if now - last_check < DB_SYNC_INTERVAL_SECONDS:
-        return
-    st.session_state["db_sync_last_check"] = now
-
-    try:
-        head = requests.head(
-            REMOTE_DB_URL,
-            headers={"Cache-Control": "no-cache"},
-            timeout=10,
-            allow_redirects=True,
-        )
-        head.raise_for_status()
-        remote_etag = head.headers.get("ETag", "")
-
-        if remote_etag and remote_etag == st.session_state.get("db_sync_etag"):
-            return
-
-        # 로컬 수집기(main.py)가 방금 저장한 DB를 오래된 GitHub 사본으로
-        # 덮어쓰면 예측 검증 기록과 최신 수집 결과가 사라질 수 있다.
-        remote_modified_text = head.headers.get("Last-Modified")
-        if remote_modified_text and DB_PATH.exists():
-            try:
-                remote_modified = parsedate_to_datetime(remote_modified_text).timestamp()
-                local_modified = DB_PATH.stat().st_mtime
-                if local_modified >= remote_modified:
-                    st.session_state["db_sync_etag"] = remote_etag
-                    st.session_state["db_sync_message"] = "로컬 최신 DB 유지"
-                    return
-            except (TypeError, ValueError, OSError):
-                # 헤더 해석에 실패하면 기존 방식대로 GitHub DB를 검증해 반영한다.
-                pass
-
-        response = requests.get(
-            REMOTE_DB_URL,
-            headers={"Cache-Control": "no-cache"},
-            timeout=30,
-        )
-        response.raise_for_status()
-
-        with NamedTemporaryFile(
-            mode="wb",
-            suffix=".db",
-            prefix="stock_data_",
-            dir=DB_PATH.parent,
-            delete=False,
-        ) as temporary_file:
-            temporary_file.write(response.content)
-            temporary_path = Path(temporary_file.name)
-
-        try:
-            if not _is_valid_database(temporary_path):
-                raise RuntimeError("GitHub에서 받은 DB 파일 검증에 실패했습니다.")
-            os.replace(temporary_path, DB_PATH)
-            st.session_state["db_sync_etag"] = remote_etag
-            st.session_state["db_sync_message"] = "GitHub 최신 DB 동기화 완료"
-        finally:
-            temporary_path.unlink(missing_ok=True)
-    except (requests.RequestException, OSError, RuntimeError) as exc:
-        # 네트워크 문제여도 기존 DB로 대시보드는 계속 표시한다.
-        st.session_state["db_sync_message"] = f"DB 동기화 보류: {exc}"
 
 st.set_page_config(page_title="HONG STOCK | 이유를 기록하는 주식 분석", layout="wide")
 
@@ -278,6 +191,45 @@ st.markdown(
         overflow-wrap: anywhere;
         word-break: keep-all;
         line-height: 1.35;
+    }
+
+    .signal-badge {
+        display: inline-block;
+        padding: 4px 8px;
+        border-radius: 999px;
+        cursor: help;
+        position: relative;
+    }
+
+    .signal-badge:hover::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: 99998;
+        background: rgba(15, 23, 42, 0.38);
+        pointer-events: none;
+    }
+
+    .signal-badge:hover::after {
+        content: attr(data-tooltip);
+        position: fixed;
+        left: 50%;
+        top: 50%;
+        z-index: 99999;
+        width: min(680px, calc(100vw - 80px));
+        transform: translate(-50%, -50%);
+        padding: 26px 30px;
+        border: 1px solid #475569;
+        border-radius: 16px;
+        background: #111827;
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.42);
+        color: #F9FAFB;
+        font-size: 20px;
+        font-weight: 600;
+        line-height: 1.7;
+        text-align: left;
+        white-space: normal;
+        pointer-events: none;
     }
 
     .stock-name-text {
@@ -459,6 +411,16 @@ def apply_display_theme(theme: str) -> None:
             background: #101317;
             color: #E5E7EB;
         }
+        [data-testid="stMain"],
+        [data-testid="stMain"] > div,
+        [data-testid="stMainBlockContainer"],
+        section.main,
+        section.main > div,
+        .main,
+        .main .block-container {
+            background: #101317 !important;
+            color: #E5E7EB !important;
+        }
         [data-testid="stSidebar"] {
             background: #171B21;
         }
@@ -485,6 +447,18 @@ def apply_display_theme(theme: str) -> None:
         [data-testid="stMetricValue"],
         .normal-text, .stock-name-text, .reason-text,
         .metric-label, .metric-value, .stock-grade {
+            color: #E5E7EB !important;
+        }
+        .metric-card,
+        [data-testid="stMetric"] {
+            background: #171B21 !important;
+            color: #E5E7EB !important;
+            border-color: #374151 !important;
+        }
+        [data-testid="stMetric"] > div,
+        [data-testid="stMetric"] [data-testid="stMetricLabel"],
+        [data-testid="stMetric"] [data-testid="stMetricValue"] {
+            background: transparent !important;
             color: #E5E7EB !important;
         }
         [data-testid="stDataFrame"],
@@ -558,6 +532,14 @@ def apply_display_theme(theme: str) -> None:
         [data-testid="stAlert"],
         [data-testid="stAlert"] * {
             color: #E5E7EB;
+        }
+        [data-testid="stAlert"] {
+            background: #18263A !important;
+            border: 1px solid #31557D !important;
+        }
+        [data-testid="stAlert"] > div,
+        [data-testid="stAlert"] [data-testid="stMarkdownContainer"] {
+            background: transparent !important;
         }
         [data-testid="stExpander"],
         [data-testid="stExpander"] details,
@@ -661,10 +643,36 @@ def apply_display_theme(theme: str) -> None:
         [data-testid="stAppViewContainer"] hr {
             border-color: #374151;
         }
-        div[data-testid="stDialog"] div[role="dialog"] {
+        [data-testid="stDialog"],
+        [data-testid="stDialog"] > div,
+        [data-testid="stDialog"] [role="dialog"],
+        [data-testid="stDialog"] [data-testid="stMainBlockContainer"],
+        [data-testid="stDialog"] .block-container,
+        [data-baseweb="modal"] [role="dialog"],
+        [data-baseweb="modal"] [role="dialog"] > div,
+        div[role="dialog"] {
             background: #101317 !important;
             color: #E5E7EB !important;
             border: 1px solid #374151;
+        }
+        [data-testid="stDialog"] h1,
+        [data-testid="stDialog"] h2,
+        [data-testid="stDialog"] h3,
+        [data-testid="stDialog"] p,
+        [data-testid="stDialog"] label,
+        [data-testid="stDialog"] span,
+        [data-baseweb="modal"] [role="dialog"] h1,
+        [data-baseweb="modal"] [role="dialog"] h2,
+        [data-baseweb="modal"] [role="dialog"] h3,
+        [data-baseweb="modal"] [role="dialog"] p,
+        [data-baseweb="modal"] [role="dialog"] label,
+        [data-baseweb="modal"] [role="dialog"] span,
+        div[role="dialog"] h1,
+        div[role="dialog"] h2,
+        div[role="dialog"] h3,
+        div[role="dialog"] p,
+        div[role="dialog"] label {
+            color: #E5E7EB !important;
         }
         div[data-testid="stDialog"] .hongstock-welcome-note {
             color: #E5E7EB;
@@ -1092,6 +1100,28 @@ def normalize_score_df(score_df: pd.DataFrame) -> pd.DataFrame:
     df["최종점수"] = final_score.round(2)
     df["총점"] = df["최종점수"]
 
+    # 장중 스냅샷은 현재순위를 사용하므로 TOP30 화면의 점수순위로 연결한다.
+    if "현재순위" in df.columns:
+        current_rank = pd.to_numeric(df["현재순위"], errors="coerce")
+        if "점수순위" in df.columns:
+            score_rank = pd.to_numeric(df["점수순위"], errors="coerce")
+            df["점수순위"] = score_rank.where(score_rank.notna(), current_rank)
+        else:
+            df["점수순위"] = current_rank
+
+    for text_column, fallback in [
+        ("최종추천", "평가 대기"),
+        ("추격위험등급", ""),
+        ("뉴스평가상태", "평가 대기"),
+    ]:
+        if text_column not in df.columns:
+            df[text_column] = fallback
+        else:
+            cleaned = df[text_column].astype("string").str.strip()
+            df[text_column] = cleaned.mask(
+                cleaned.isna() | cleaned.str.lower().isin(["nan", "none", ""]), fallback
+            )
+
     if "시장기준일" not in df.columns:
         df["시장기준일"] = ""
     else:
@@ -1119,6 +1149,102 @@ def normalize_score_df(score_df: pd.DataFrame) -> pd.DataFrame:
         )
 
     return df
+
+
+def enrich_current_signals(current_df: pd.DataFrame, score_history: pd.DataFrame) -> pd.DataFrame:
+    """장중 스냅샷에 빠진 진입·위험·목표 정보를 최신 분석 행으로 보충한다."""
+    if current_df.empty or score_history.empty or "종목코드" not in current_df.columns:
+        return current_df
+    history = score_history.copy()
+    if "종목코드" not in history.columns:
+        return current_df
+    update_dates = history.get(
+        "최종갱신일자", pd.Series("", index=history.index)
+    ).astype(str)
+    update_times = history.get(
+        "최종갱신시간", pd.Series("00:00:00", index=history.index)
+    ).astype(str)
+    updated = pd.to_datetime(update_dates + " " + update_times, errors="coerce")
+    latest = history.assign(_updated=updated).sort_values("_updated").drop_duplicates(
+        "종목코드", keep="last"
+    ).set_index("종목코드")
+    result = current_df.copy()
+    fields = [
+        "최종추천", "진입판단", "돌파신뢰도", "추격위험도", "추격위험등급",
+        "목표저항선", "손절기준", "AI추천사유", "진입판단사유",
+    ]
+    for field in fields:
+        mapped = result["종목코드"].map(latest[field]) if field in latest.columns else None
+        if mapped is None:
+            continue
+        if field not in result.columns:
+            result[field] = mapped
+        else:
+            original = result[field]
+            missing = original.isna() | original.astype(str).str.strip().str.lower().isin(
+                ["", "nan", "none", "<na>", "평가 대기"]
+            )
+            result[field] = original.where(~missing, mapped)
+    return result
+
+
+def make_signal_badge(row: pd.Series, current_price: float = 0.0) -> tuple[str, str]:
+    """현재 분석과 가격을 매수·대기·매도 상태 및 마우스 설명으로 바꾼다."""
+    analysis_date = pd.to_datetime(
+        row.get("최종갱신일자", row.get("저장일자")), errors="coerce"
+    )
+    if pd.isna(analysis_date) or analysis_date.date() != pd.Timestamp.now().date():
+        tooltip = "오늘의 장중 분석이 아직 없습니다. 장 시작 후 첫 수집이 완료되면 판단이 표시됩니다."
+        badge = (
+            f'<span class="signal-badge" data-tooltip="{html.escape(tooltip, quote=True)}" '
+            'style="color:#64748B;font-weight:700">⚪ 장 시작 대기</span>'
+        )
+        return badge, tooltip
+
+    recommendation = str(row.get("최종추천", "평가 대기") or "평가 대기").strip()
+    entry = str(row.get("진입판단", "분석 대기") or "분석 대기").strip()
+    breakout = safe_float(row.get("돌파신뢰도", 0))
+    chase = safe_float(row.get("추격위험도", 100))
+    target = safe_float(row.get("목표저항선", 0))
+    stop = safe_float(row.get("손절기준", 0))
+    price = safe_float(current_price)
+    reasons = []
+    if recommendation not in {"강력관심", "관심"}:
+        reasons.append(f"추천 {recommendation}")
+    if entry not in {"돌파 확인", "지지선 근처"}:
+        reasons.append(f"진입 {entry}")
+    if breakout < 60:
+        reasons.append(f"돌파신뢰도 {breakout:.0f}점")
+    if chase >= 45:
+        reasons.append(f"추격위험 {chase:.0f}점")
+
+    if price > 0 and target > 0 and price >= target:
+        label, color, action = "🔴 보유 시 익절", "#DC2626", "목표가 도달"
+    elif price > 0 and stop > 0 and price <= stop:
+        label, color, action = "🔴 보유 시 손절", "#DC2626", "손절가 이탈"
+    elif not reasons:
+        label, color, action = "🟢 매수 가능", "#15803D", "모든 매수 조건 통과"
+    elif recommendation in {"약세", "제외"} or chase >= 70:
+        label, color, action = "⚫ 매수 금지", "#6B7280", " · ".join(reasons)
+    else:
+        label, color, action = "🟡 대기", "#CA8A04", " · ".join(reasons)
+
+    checked_at = str(row.get("최종갱신시간", row.get("저장시간", "")) or "")
+    parts = [action]
+    if price > 0:
+        parts.append(f"현재가 {price:,.0f}원")
+    if target > 0:
+        parts.append(f"목표가 {target:,.0f}원")
+    if stop > 0:
+        parts.append(f"손절가 {stop:,.0f}원")
+    if checked_at:
+        parts.append(f"판단시각 {checked_at}")
+    tooltip = " | ".join(parts)
+    badge = (
+        f'<span class="signal-badge" data-tooltip="{html.escape(tooltip, quote=True)}" '
+        f'style="color:{color};font-weight:700">{label}</span>'
+    )
+    return badge, tooltip
 
 
 def normalize_master_df(master_df: pd.DataFrame) -> pd.DataFrame:
@@ -2511,6 +2637,14 @@ def show_today_top(
         st.info(f"{sort_option}에 필요한 데이터가 아직 없습니다. 최종점수순으로 표시합니다.")
         today_df = today_df.sort_values(["최종점수", "시장점수"], ascending=False)
 
+    top30_codes = tuple(clean_code(code) for code in today_df.head(30)["종목코드"].tolist())
+    top30_quotes: dict[str, dict] = {}
+    if top30_codes:
+        hub = get_realtime_quote_hub()
+        hub.ensure_codes(top30_codes, source="dashboard_top30")
+        top30_quotes = hub.snapshot(top30_codes).get("quotes", {})
+        st_autorefresh(interval=5000, key="top30_signal_refresh")
+
     detail_popup = make_stock_dialog(
         score_df=score_df,
         chart_df=chart_df,
@@ -2538,6 +2672,7 @@ def show_today_top(
         0.85,  # 최종
         1.2,   # 추격 위험
         1.0,   # 추천
+        1.15,  # 매매 신호
         1.25,  # 모의 매수
     ]
 
@@ -2551,6 +2686,7 @@ def show_today_top(
         "최종",
         "추격 위험",
         "추천",
+        "매매 신호",
         "모의투자",
     ]
 
@@ -2563,8 +2699,11 @@ def show_today_top(
         name = str(row.get("종목명", "")).strip()
         cols = st.columns(widths)
 
+        rank_value = pd.to_numeric(row.get("점수순위"), errors="coerce")
+        rank_text = str(int(rank_value)) if pd.notna(rank_value) else "—"
+
         cols[0].markdown(
-            f"<div class='normal-text'>{row.get('점수순위', '')}</div>",
+            f"<div class='normal-text'>{rank_text}</div>",
             unsafe_allow_html=True,
         )
 
@@ -2639,6 +2778,8 @@ def show_today_top(
         recommendation = str(
             row.get("최종추천", "")
         ).strip()
+        if recommendation.lower() in {"", "nan", "none", "<na>"}:
+            recommendation = "평가 대기"
 
         recommendation_colors = {
             "강력관심": "#15803D",
@@ -2663,13 +2804,17 @@ def show_today_top(
             unsafe_allow_html=True,
         )
 
+        signal_price = safe_float(top30_quotes.get(code, {}).get("price", 0))
+        signal_badge, _ = make_signal_badge(row, signal_price)
+        cols[9].markdown(signal_badge, unsafe_allow_html=True)
+
         fallback_price = 0.0
         for price_column in ("현재가", "종가", "기준종가"):
             if price_column in row.index:
                 fallback_price = safe_float(row.get(price_column, 0))
                 if fallback_price > 0:
                     break
-        if cols[9].button(
+        if cols[10].button(
             "모의 매수",
             key=f"top30_paper_buy_{selected_date}_{code}",
             use_container_width=True,
@@ -2720,7 +2865,12 @@ def show_stock_search(
         chase_risk = 0.0
         if not selected_score.empty and "추격위험도" in selected_score.columns:
             chase_risk = safe_float(selected_score.iloc[-1].get("추격위험도", 0))
-        record_behavior_event("search", selected_code, selected_name, {"chase_risk": chase_risk})
+        record_behavior_event(
+            "search",
+            selected_code,
+            selected_name,
+            {"chase_risk": chase_risk},
+        )
         st.session_state["last_profile_search_event"] = profile_event_key
 
     show_stock_detail_by_code(
@@ -2878,33 +3028,177 @@ def show_market_overview():
         for error in errors:
             st.warning(error)
 
-def show_prediction_performance_summary():
-    """메인 화면에서 5거래일 기준 추천 성과를 간단히 보여준다."""
-    st.subheader("예측 검증 성과")
-    summary = get_prediction_summary()
+def show_prediction_performance_summary(show_details: bool = True):
+    """TOP3·TOP30·사용자 모의투자의 실제 청산 성과를 비교한다."""
+    if show_details:
+        st.subheader("기간별 수익률")
+        period = st.radio(
+            "성과 기간", ["일간", "주간", "월간", "연간"],
+            horizontal=True, key="strategy_performance_period",
+        )
+    else:
+        st.subheader("오늘 수익률 요약")
+        period = "일간"
+    summary, positions, trades = get_strategy_performance(period)
 
-    success_rate = summary["success_rate"]
-    average_return = summary["average_return"]
-    columns = st.columns(4)
-    columns[0].metric(
-        "예측 성공률",
-        f"{success_rate:.1f}%" if success_rate is not None else "집계 대기",
-        "추천 후 5거래일 상승 기준" if success_rate is not None else None,
-    )
-    columns[1].metric(
-        "검증 완료",
-        f"{summary['completed']:,}건",
-        f"전체 표본 {summary['total']:,}건",
-    )
-    columns[2].metric("검증 대기", f"{summary['waiting']:,}건")
-    columns[3].metric(
-        "평균 5일 수익률",
-        f"{average_return:+.2f}%" if average_return is not None else "집계 대기",
-    )
+    now = pd.Timestamp.now()
+    period_starts = {
+        "일간": now.normalize(),
+        "주간": (now - pd.Timedelta(days=now.weekday())).normalize(),
+        "월간": now.normalize().replace(day=1),
+        "연간": now.normalize().replace(month=1, day=1),
+    }
+    manual_available = not is_remote_storage_enabled() or is_paper_user_authenticated()
+    try:
+        paper_orders = get_paper_orders(limit=10000)
+        manual_positions_count = len(get_paper_positions())
+    except (PermissionError, RuntimeError, ValueError):
+        paper_orders = pd.DataFrame()
+        manual_positions_count = 0
+    manual = {
+        "전략": "내 모의투자" if manual_available else "내 모의투자(로그인 필요)",
+        "청산거래": 0, "수익거래": 0, "손실거래": 0,
+        "성공률(%)": None, "실현손익": 0.0, "기간수익률(%)": 0.0,
+        "보유종목": manual_positions_count,
+    }
+    if paper_orders is not None and not paper_orders.empty:
+        orders = paper_orders.copy()
+        orders["ordered_at"] = pd.to_datetime(orders["ordered_at"], errors="coerce")
+        sells = orders[
+            (orders["side"].astype(str).str.upper() == "SELL")
+            & (orders["ordered_at"] >= period_starts[period])
+        ]
+        if not sells.empty:
+            completed = len(sells)
+            wins = int((pd.to_numeric(sells["realized_profit"], errors="coerce").fillna(0) > 0).sum())
+            profit = float(pd.to_numeric(sells["realized_profit"], errors="coerce").fillna(0).sum())
+            manual.update({
+                "청산거래": completed, "수익거래": wins, "손실거래": completed - wins,
+                "성공률(%)": wins / completed * 100, "실현손익": profit,
+                "기간수익률(%)": profit / 100_000_000 * 100,
+            })
+    summary = pd.concat([summary, pd.DataFrame([manual])], ignore_index=True)
+
+    cards = st.columns(3)
+    labels = {
+        "TOP3": "TOP3 수익률", "TOP30": "TOP30 수익률",
+        "내 모의투자": "모의투자 수익률",
+        "내 모의투자(로그인 필요)": "모의투자 수익률 · 로그인 필요",
+    }
+    for card, (_, row) in zip(cards, summary.iterrows()):
+        rate = row["성공률(%)"]
+        card.metric(
+            labels.get(row["전략"], row["전략"]),
+            f"{row['기간수익률(%)']:+.2f}%",
+            (
+                f"실현손익 {row['실현손익']:+,.0f}원"
+                if abs(float(row["실현손익"])) >= 1 else None
+            ),
+        )
+        card.caption(
+            f"승률 {rate:.1f}% · 청산 {int(row['청산거래'])}건" if pd.notna(rate) else
+            "승률 집계 대기 · 청산 거래 없음"
+        )
+        card.caption(
+            f"수익 {int(row['수익거래'])} / 손실 {int(row['손실거래'])} · "
+            f"보유 {int(row['보유종목'])}종목"
+        )
+
+    top3_status = get_top3_signal_status()
+    if show_details:
+        display = summary.rename(columns={"전략": "계좌"}).copy()
+        display["계좌"] = display["계좌"].map(labels).fillna(display["계좌"])
+        display["성공률(%)"] = display["성공률(%)"].map(
+            lambda value: f"{value:.1f}%" if pd.notna(value) else "집계 대기"
+        )
+        display = display.rename(columns={"성공률(%)": "승률(%)"})
+        display["실현손익"] = display["실현손익"].map(lambda value: f"{value:+,.0f}원")
+        display["기간수익률(%)"] = display["기간수익률(%)"].map(lambda value: f"{value:+.2f}%")
+        st.dataframe(display, use_container_width=True, hide_index=True)
+
+        if not top3_status.empty:
+            with st.expander("TOP3 매수·매도 판단 상세"):
+                status_view = top3_status.drop(columns=["스냅샷"]).copy()
+                for column in ["현재가", "목표가", "손절가"]:
+                    status_view[column] = status_view[column].map(lambda value: f"{value:,.0f}원")
+                st.dataframe(status_view, use_container_width=True, hide_index=True)
+                st.caption(
+                    f"기준 스냅샷: {top3_status['스냅샷'].iloc[0]} · "
+                    "분석 매수 신호가 발생하면 진입하고, 분석 매도 신호가 발생하면 청산합니다. 목표가·손절가는 안전장치입니다."
+                )
+
+        with st.expander("🧪 실제 일봉 한 달 워크포워드 백테스트", expanded=True):
+            st.warning(
+                "과거 실제 일봉을 날짜순으로 재생한 백테스트입니다. 당시의 완전한 뉴스·수급 스냅샷은 "
+                "4일치뿐이므로 가격 추세·거래량으로 매일 순위를 재산출한 결과이며 미래 수익을 보장하지 않습니다."
+            )
+            backtest_summary, backtest_trades = run_walk_forward_backtest(DB_PATH, trading_days=20)
+            if backtest_summary.empty:
+                st.info("백테스트에 필요한 일봉 데이터가 부족합니다.")
+            else:
+                view = backtest_summary.copy()
+                view["성공률(%)"] = view["성공률(%)"].map(lambda value: f"{value:.1f}%" if pd.notna(value) else "-")
+                view = view.rename(columns={"성공률(%)": "승률(%)"})
+                view["실현손익"] = view["실현손익"].map(lambda value: f"{value:+,.0f}원")
+                view["평가자산"] = view["평가자산"].map(lambda value: f"{value:,.0f}원")
+                view["누적수익률(%)"] = view["누적수익률(%)"].map(lambda value: f"{value:+.2f}%")
+                st.dataframe(view, use_container_width=True, hide_index=True)
+                if not backtest_trades.empty:
+                    with st.expander("백테스트 매매 내역"):
+                        trade_view = backtest_trades.copy()
+                        trade_view["수익률(%)"] = trade_view["수익률(%)"].map(lambda value: f"{value:+.2f}%")
+                        trade_view["실현손익"] = trade_view["실현손익"].map(lambda value: f"{value:+,.0f}원")
+                        st.dataframe(trade_view, use_container_width=True, hide_index=True)
+            st.caption(
+                "조건: 최근 20거래일 · 강화된 분석 신호 후 다음 거래일 시가 매수 · 지지선·변동성 기반 손절 · 저항선 목표 · 최소 손익비 1.5 · 거래당 계좌위험 최대 1% · "
+                "분석 매수·매도 신호 우선 · 순위 변동만으로는 청산하지 않음 · 목표가·손절가는 안전장치 · 수수료·매도세 반영"
+            )
+    elif not top3_status.empty:
+        actionable = top3_status[
+            top3_status["상태"].isin(["매수 신호", "매도 신호"])
+        ]
+        if actionable.empty:
+            st.caption("현재 TOP3 신규 매수·매도 신호 없음 · 대기 사유는 ‘수익률’에서 확인")
+        else:
+            for _, signal in actionable.iterrows():
+                st.info(
+                    f"{signal['상태']} · {signal['종목명']} · 현재가 {signal['현재가']:,.0f}원 · "
+                    f"{signal['판단 이유']}"
+                )
     st.caption(
-        "관심·관찰 추천을 하루 한 번 기록하고, 추천 다음 5거래일 종가가 "
-        "추천 시점 종가보다 높으면 성공으로 집계합니다. 표본이 쌓일수록 신뢰도가 높아집니다."
+        "승률은 수수료·세금을 반영한 수익 청산 거래 ÷ 전체 청산 거래입니다. "
+        "미청산 종목은 성공·실패에서 제외하며 미래 가격으로 신호를 소급하지 않습니다."
     )
+    top30_positions = (
+        positions[positions["strategy"] == "TOP30"].copy()
+        if positions is not None and not positions.empty else pd.DataFrame()
+    )
+    if show_details:
+        with st.expander("TOP30 매수·매도 판단 상세"):
+            if top30_positions.empty:
+                st.info("아직 TOP30 가상매수 종목이 없습니다. 2026-07-20 장 시작 후 자동 기록됩니다.")
+            else:
+                position_view = top30_positions[
+                    ["strategy", "stock_name", "quantity", "entry_price", "target_price",
+                     "stop_price", "entry_score", "entry_rank", "opened_at"]
+                ].rename(columns={
+                    "strategy": "구분", "stock_name": "종목명", "quantity": "수량",
+                    "entry_price": "매수가", "target_price": "목표가", "stop_price": "손절가",
+                    "entry_score": "진입점수", "entry_rank": "진입순위", "opened_at": "매수시각",
+                })
+                st.dataframe(position_view, use_container_width=True, hide_index=True)
+    if show_details and trades is not None and not trades.empty:
+        with st.expander(f"{period} 청산 내역"):
+            trade_view = trades[
+                ["strategy", "stock_name", "entry_price", "exit_price", "realized_profit",
+                 "return_rate", "opened_at", "closed_at", "exit_reason"]
+            ].rename(columns={
+                "strategy": "전략", "stock_name": "종목명", "entry_price": "매수가",
+                "exit_price": "매도가", "realized_profit": "순손익",
+                "return_rate": "수익률(%)", "opened_at": "매수시각",
+                "closed_at": "매도시각", "exit_reason": "매도이유",
+            })
+            st.dataframe(trade_view, use_container_width=True, hide_index=True)
 
 
 
@@ -3281,6 +3575,8 @@ def show_realtime_recommendations(
             delta = "KIS 현재가 미수신"
 
         columns[index].markdown(f"**{index + 1}. {name}**")
+        signal_badge, _ = make_signal_badge(row, price)
+        columns[index].markdown(signal_badge, unsafe_allow_html=True)
         columns[index].metric("현재가", value, delta)
         show_recommendation_mini_chart(
             columns[index],
@@ -3432,9 +3728,6 @@ def show_market_home(
         chart_df=chart_df,
         master_df=master_df,
     )
-
-    st.divider()
-    show_prediction_performance_summary()
 
 
 def show_today_preparation_and_recommendations(
@@ -3624,6 +3917,19 @@ def show_current_status_banner(current_df: pd.DataFrame):
     age_minutes = (
         pd.Timestamp.now() - updated
     ).total_seconds() / 60
+
+    now = pd.Timestamp.now()
+    market_minutes = now.hour * 60 + now.minute
+    is_regular_market = (
+        now.weekday() < 5
+        and 9 * 60 <= market_minutes <= 15 * 60 + 30
+    )
+    if not is_regular_market:
+        st.info(
+            f"장 시작 전·마감 후입니다. 마지막 장중 분석: {updated:%Y-%m-%d %H:%M:%S} · "
+            "정규장 중에는 30분마다 갱신됩니다."
+        )
+        return
 
     if age_minutes > 45:
         st.error(
@@ -4028,11 +4334,13 @@ def show_ai_analysis(score_df: pd.DataFrame, chart_df: pd.DataFrame, master_df: 
 
 
 def show_investor_profile():
+    """모의투자·검색 행동으로 계산한 개인 성향 화면."""
     profile = get_investor_profile(days=30)
     st.header("투자 성향")
     st.caption("최근 30일의 검색·열람·모의 주문 기록을 바탕으로 본인 행동을 점검합니다. 투자 적합성 판정이나 매수 추천은 아닙니다.")
     st.subheader(profile["profile"])
     st.write(profile["summary"])
+
     columns = st.columns(5)
     columns[0].metric("행동 기록", f"{profile['total_actions']}건")
     columns[1].metric("종목 검색·열람", f"{profile['searches'] + profile['views']}건")
@@ -4040,17 +4348,20 @@ def show_investor_profile():
     columns[3].metric("모의 매도", f"{profile['sells']}건")
     risk_ratio = profile["high_risk_ratio"]
     columns[4].metric("고위험 후보 열람", f"{risk_ratio:.0f}%" if risk_ratio is not None else "집계 대기")
+
     st.subheader("조심 알림")
     if profile["warnings"]:
         for warning in profile["warnings"]:
             st.warning(warning)
     else:
         st.success("현재 기록에서는 반복적 충동 진입 신호가 뚜렷하지 않습니다.")
+
     st.subheader("자주 보는 종목")
-    if profile["favorites"].empty:
+    favorites = profile["favorites"]
+    if favorites.empty:
         st.info("종목 검색이나 모의 주문을 기록하면 관심 종목 패턴이 표시됩니다.")
     else:
-        st.dataframe(profile["favorites"], use_container_width=True, hide_index=True)
+        st.dataframe(favorites, use_container_width=True, hide_index=True)
 
 
 def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"):
@@ -4086,15 +4397,21 @@ def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"
     price_map = {}
     if not positions.empty and needs_live_price:
         position_codes = tuple(clean_code(code) for code in positions["stock_code"].astype(str))
+        # 초단위 갱신에는 이미 연결된 WebSocket을 재사용한다. REST는 WebSocket이
+        # 아직 도착하지 않았을 때만 20초 캐시된 보정값으로 사용한다.
         hub = get_realtime_quote_hub()
         hub.ensure_codes(position_codes, source="paper_positions")
         realtime_quotes = hub.snapshot(position_codes).get("quotes", {})
         fallback_quotes = load_recommendation_quotes(position_codes)
         price_map = {
-            code: safe_float(realtime_quotes.get(code, {}).get("price") or fallback_quotes.get(code, {}).get("price"))
+            code: safe_float(
+                realtime_quotes.get(code, {}).get("price")
+                or fallback_quotes.get(code, {}).get("price")
+            )
             for code in position_codes
         }
 
+    # 모의 주문 화면에서만 체결 직전 가격을 한 번 확인한다.
     order_token = get_access_token() if section == "모의 주문" else None
 
     if positions.empty:
@@ -4670,36 +4987,48 @@ def main():
     st.title("HONG STOCK")
     st.caption("추천보다 이유를 기록하는 주식 분석")
 
-    # 화면을 열어 둔 상태에서도 1분마다 새 DB를 확인한다.
-    st_autorefresh(
-        interval=DB_SYNC_INTERVAL_SECONDS * 1000,
-        key="dashboard_db_auto_refresh",
-    )
-    sync_database_from_github()
+    # 집과 회사 모두 이 프로젝트 폴더에 있는 Google Drive 공용 DB만 사용한다.
 
     all_score_df = normalize_score_df(
         load_table("score")
     )
 
     history_df = all_score_df.copy()
+    snapshot_df = load_table("intraday_snapshot")
 
-    if all_score_df.empty:
-        current_df = pd.DataFrame()
-    else:
+    # 현재 추천 화면은 같은 DB 안의 최신 장중 스냅샷을 단일 기준으로 삼는다.
+    # score 테이블에는 재분석 시점별 묶음이 함께 쌓이므로 단순히 가장 늦게
+    # 저장된 묶음을 고르면 다른 PC에서 보던 장 마감 순위와 달라질 수 있다.
+    current_df = pd.DataFrame()
+    central_df, central_snapshot_at = load_latest_scores()
+    if not central_df.empty:
+        current_df = normalize_score_df(central_df)
+        if central_snapshot_at is not None:
+            central_kst = central_snapshot_at.tz_convert("Asia/Seoul")
+            current_df["저장일자"] = central_kst.strftime("%Y-%m-%d")
+            current_df["저장시간"] = central_kst.strftime("%H:%M:%S")
+    if current_df.empty and not snapshot_df.empty and "스냅샷일시" in snapshot_df.columns:
+        snapshot_datetime = pd.to_datetime(
+            snapshot_df["스냅샷일시"], errors="coerce"
+        )
+        latest_snapshot = snapshot_datetime.max()
+        if pd.notna(latest_snapshot):
+            current_df = normalize_score_df(
+                snapshot_df[snapshot_datetime == latest_snapshot].copy()
+            )
+
+    # 장중 스냅샷이 아직 없는 초기 DB에서만 score의 최신 묶음을 사용한다.
+    if current_df.empty and not all_score_df.empty:
         update_datetime = pd.to_datetime(
             all_score_df["저장일자"].astype(str)
             + " "
             + all_score_df["저장시간"].astype(str),
             errors="coerce",
         )
-
         latest_update = update_datetime.max()
+        current_df = all_score_df[update_datetime == latest_update].copy()
 
-        current_df = all_score_df[
-            update_datetime == latest_update
-            ].copy()
-
-    snapshot_df = load_table("intraday_snapshot")
+    current_df = enrich_current_signals(current_df, all_score_df)
 
     chart_df = load_table("chart_history")
 
@@ -4727,6 +5056,8 @@ def main():
     elif st.session_state["active_dashboard_page"] == "오늘 장 준비·시장 현황":
         # 기존 화면을 열어 둔 사용자는 새 홈 메뉴로 자연스럽게 이동시킨다.
         st.session_state["active_dashboard_page"] = "홈"
+    elif st.session_state["active_dashboard_page"] == "전략 성과":
+        st.session_state["active_dashboard_page"] = "수익률"
 
     selected_theme = st.sidebar.radio(
         "화면 테마",
@@ -4811,6 +5142,7 @@ def main():
     sidebar_page_button("과거 분석", "과거 분석", "nav_history")
 
     st.sidebar.markdown("## 💰 모의투자")
+    sidebar_page_button("수익률", "수익률", "nav_strategy_performance")
     sidebar_page_button("모의 주문", "모의 주문", "nav_paper_order")
     sidebar_page_button("보유 종목", "보유 종목", "nav_paper_positions")
     sidebar_page_button("거래 내역", "거래 내역", "nav_paper_history")
@@ -4821,6 +5153,12 @@ def main():
         sidebar_page_button("DB 상태", "DB 상태", "nav_db")
 
     menu = st.session_state["active_dashboard_page"]
+
+    if menu == "수익률":
+        st.header("수익률")
+        st.caption("TOP3·TOP30·모의투자의 실제 청산 수익률을 비교합니다.")
+        show_prediction_performance_summary(show_details=True)
+        return
 
     if menu in {"모의 주문", "보유 종목", "거래 내역", "투자 성향"}:
         if is_remote_storage_enabled() and not is_paper_user_authenticated():
@@ -4881,7 +5219,13 @@ def main():
             return
 
         display_df = current_df.copy()
-        display_df["저장일자"] = pd.Timestamp.now().date()
+        available_dates = pd.to_datetime(
+            display_df.get("저장일자"), errors="coerce"
+        ).dropna()
+        selected_date = (
+            available_dates.max().date()
+            if not available_dates.empty else pd.Timestamp.now().date()
+        )
 
         show_today_top(
             score_df=display_df,
@@ -4890,7 +5234,7 @@ def main():
             news_df=news_df,
             classification_df=classification_df,
             theme_history_df=theme_history_df,
-            selected_date=pd.Timestamp.now().date(),
+            selected_date=selected_date,
         )
         return
 

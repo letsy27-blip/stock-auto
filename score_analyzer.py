@@ -573,7 +573,12 @@ def _news_lookup(
     }
 
 def _financial_lookup(financial_df: pd.DataFrame | None, stock_code: str) -> dict[str, Any]:
-    default = {"재무점수": 0.0, "재무등급": "평가 제외", "재무사유": "재무 데이터 없음", "재무기준일": ""}
+    default = {
+        "재무점수": 0.0,
+        "재무등급": "평가 제외",
+        "재무사유": "재무 데이터 없음",
+        "재무기준일": "",
+    }
     if financial_df is None or financial_df.empty or "종목코드" not in financial_df.columns:
         return default
     data = financial_df.copy()
@@ -582,7 +587,12 @@ def _financial_lookup(financial_df: pd.DataFrame | None, stock_code: str) -> dic
     if hit.empty:
         return default
     row = hit.iloc[-1]
-    return {"재무점수": round(_clip(_safe_float(row.get("재무점수")), -10.0, 10.0), 2), "재무등급": str(row.get("재무등급") or "평가 제외"), "재무사유": str(row.get("재무사유") or "재무 데이터 없음"), "재무기준일": str(row.get("재무기준일") or "")}
+    return {
+        "재무점수": round(_clip(_safe_float(row.get("재무점수")), -10.0, 10.0), 2),
+        "재무등급": str(row.get("재무등급") or "평가 제외"),
+        "재무사유": str(row.get("재무사유") or "재무 데이터 없음"),
+        "재무기준일": str(row.get("재무기준일") or ""),
+    }
 
 
 def _extract_news_score(row: pd.Series) -> float:
