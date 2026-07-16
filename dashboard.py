@@ -3828,21 +3828,18 @@ def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"
     paper_orders = get_paper_orders(limit=10000)
     previous_price_map = st.session_state.get("paper_previous_prices", {})
     price_map = {}
-    token = None
-    if needs_live_price:
-        try:
-            token = get_access_token()
-        except Exception:
-            token = None
+    if not positions.empty and needs_live_price:
+        position_codes = tuple(clean_code(code) for code in positions["stock_code"].astype(str))
+        hub = get_realtime_quote_hub()
+        hub.ensure_codes(position_codes, source="paper_positions")
+        realtime_quotes = hub.snapshot(position_codes).get("quotes", {})
+        fallback_quotes = load_recommendation_quotes(position_codes)
+        price_map = {
+            code: safe_float(realtime_quotes.get(code, {}).get("price") or fallback_quotes.get(code, {}).get("price"))
+            for code in position_codes
+        }
 
-    if not positions.empty and token:
-        for code in positions["stock_code"].astype(str):
-            try:
-                body = get_current_price(token, clean_code(code))
-                output = body.get("output", {}) if isinstance(body, dict) else {}
-                price_map[clean_code(code)] = float(output.get("stck_prpr", 0) or 0)
-            except Exception:
-                price_map[clean_code(code)] = 0
+    order_token = get_access_token() if section == "모의 주문" else None
 
     if positions.empty:
         market_value = 0.0
@@ -4271,9 +4268,9 @@ def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"
         selected_label = st.selectbox("종목", list(options))
         code, name = options[selected_label]
         live_price = 0.0
-        if token:
+        if order_token:
             try:
-                body = get_current_price(token, code)
+                body = get_current_price(order_token, code)
                 live_price = float((body.get("output") or {}).get("stck_prpr", 0) or 0)
             except Exception:
                 live_price = 0.0
@@ -4298,8 +4295,8 @@ def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"
         def execute_paper_order(side):
             try:
                 execution_price = price
-                if token:
-                    latest_body = get_current_price(token, code)
+                if order_token:
+                    latest_body = get_current_price(order_token, code)
                     latest_price = float(
                         (latest_body.get("output") or {}).get("stck_prpr", 0) or 0
                     )
