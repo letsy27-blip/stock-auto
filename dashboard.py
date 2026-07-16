@@ -372,7 +372,6 @@ st.markdown(
     }
 
     [class*="st-key-top30_paper_buy_"] button {
-        color: #2563EB !important;
         font-weight: 600 !important;
     }
 
@@ -464,6 +463,9 @@ def apply_display_theme(theme: str) -> None:
         [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2,
         [data-testid="stSidebar"] label,
         [data-testid="stSidebar"] p {
+            color: #E5E7EB !important;
+        }
+        [class*="st-key-top30_paper_buy_"] button {
             color: #E5E7EB !important;
         }
         [data-testid="stSidebar"] .stButton > button:hover,
