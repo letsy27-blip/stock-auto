@@ -308,7 +308,8 @@ st.markdown(
     [class*="st-key-news_bad_"] button,
     [class*="st-key-news_neutral_"] button,
     [class*="st-key-news_none_"] button,
-    [class*="st-key-news_unanalyzed_"] button {
+    [class*="st-key-news_unanalyzed_"] button,
+    [class*="st-key-top30_paper_buy_"] button {
         background: transparent !important;
         border: 0 !important;
         box-shadow: none !important;
@@ -332,7 +333,8 @@ st.markdown(
     [class*="st-key-news_bad_"] button:hover,
     [class*="st-key-news_neutral_"] button:hover,
     [class*="st-key-news_none_"] button:hover,
-    [class*="st-key-news_unanalyzed_"] button:hover {
+    [class*="st-key-news_unanalyzed_"] button:hover,
+    [class*="st-key-top30_paper_buy_"] button:hover {
         color: #2563EB !important;
         text-decoration: underline !important;
         background: transparent !important;
@@ -345,7 +347,8 @@ st.markdown(
     [class*="st-key-news_bad_"] button:focus,
     [class*="st-key-news_neutral_"] button:focus,
     [class*="st-key-news_none_"] button:focus,
-    [class*="st-key-news_unanalyzed_"] button:focus {
+    [class*="st-key-news_unanalyzed_"] button:focus,
+    [class*="st-key-top30_paper_buy_"] button:focus {
         box-shadow: none !important;
         outline: none !important;
     }
@@ -366,6 +369,11 @@ st.markdown(
 
     [class*="st-key-trading_link_"] button {
         color: #374151 !important;
+    }
+
+    [class*="st-key-top30_paper_buy_"] button {
+        color: #2563EB !important;
+        font-weight: 600 !important;
     }
 
     </style>
