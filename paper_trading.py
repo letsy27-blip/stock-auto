@@ -5,12 +5,23 @@ from pathlib import Path
 
 import pandas as pd
 
+import supabase_paper_trading as cloud_paper
+
 
 INITIAL_CASH = 100_000_000
 BUY_FEE_RATE = 0.00015
 SELL_FEE_RATE = 0.00015
 SELL_TAX_RATE = 0.0018
 DB_PATH = Path(__file__).resolve().with_name("paper_trading.db")
+
+
+def is_remote_storage_enabled() -> bool:
+    """Supabase 연결 키가 있으면 공개 앱용 영구 저장소를 사용한다."""
+    return cloud_paper.is_enabled()
+
+
+def is_paper_user_authenticated() -> bool:
+    return cloud_paper.is_authenticated()
 
 
 def _connect():
@@ -22,6 +33,10 @@ def _connect():
 
 
 def initialize_paper_account():
+    if is_remote_storage_enabled():
+        if is_paper_user_authenticated():
+            cloud_paper.initialize_account()
+        return
     with _connect() as connection:
         connection.executescript(
             """
@@ -80,6 +95,11 @@ def initialize_paper_account():
 
 def record_behavior_event(event_type: str, stock_code: str = "", stock_name: str = "", metadata: dict | None = None) -> None:
     """개인 로컬 모의투자 행동을 저장한다. 실제 주문이나 외부 전송은 하지 않는다."""
+    if is_remote_storage_enabled():
+        # 공개 분석은 비로그인 상태에서도 볼 수 있으나, 개인 행동은 기록하지 않는다.
+        if is_paper_user_authenticated():
+            cloud_paper.record_behavior_event(event_type, stock_code, stock_name, metadata)
+        return
     initialize_paper_account()
     event_type = str(event_type).upper()
     if event_type not in {"SEARCH", "VIEW", "BUY", "SELL"}:
@@ -94,11 +114,16 @@ def record_behavior_event(event_type: str, stock_code: str = "", stock_name: str
 
 def get_investor_profile(days: int = 30) -> dict:
     """최근 행동을 바탕으로 성향과 충동 진입 경고를 계산한다."""
-    initialize_paper_account()
     since = (datetime.now() - timedelta(days=max(1, int(days)))).isoformat(timespec="seconds")
-    with _connect() as connection:
-        events = pd.read_sql_query("SELECT * FROM investor_behavior_events WHERE occurred_at >= ? ORDER BY occurred_at", connection, params=(since,))
     default = {"profile": "분석 중", "summary": "아직 행동 표본이 적습니다. 종목을 검색하고 모의 주문을 기록하면 성향이 표시됩니다.", "warnings": [], "total_actions": 0, "searches": 0, "views": 0, "buys": 0, "sells": 0, "high_risk_ratio": None, "rapid_entry_count": 0, "favorites": pd.DataFrame(columns=["종목코드", "종목명", "열람·검색", "매수", "매도"])}
+    if is_remote_storage_enabled():
+        if not is_paper_user_authenticated():
+            return default
+        events = cloud_paper.get_events_since(since)
+    else:
+        initialize_paper_account()
+        with _connect() as connection:
+            events = pd.read_sql_query("SELECT * FROM investor_behavior_events WHERE occurred_at >= ? ORDER BY occurred_at", connection, params=(since,))
     if events.empty:
         return default
     events["occurred_at"] = pd.to_datetime(events["occurred_at"], errors="coerce")
@@ -136,12 +161,16 @@ def get_investor_profile(days: int = 30) -> dict:
 
 
 def get_account():
+    if is_remote_storage_enabled():
+        return cloud_paper.get_account()
     initialize_paper_account()
     with _connect() as connection:
         return dict(connection.execute("SELECT * FROM paper_account WHERE id = 1").fetchone())
 
 
 def get_positions():
+    if is_remote_storage_enabled():
+        return cloud_paper.get_positions()
     initialize_paper_account()
     with _connect() as connection:
         return pd.read_sql_query(
@@ -152,6 +181,8 @@ def get_positions():
 
 
 def get_orders(limit=200):
+    if is_remote_storage_enabled():
+        return cloud_paper.get_orders(limit)
     initialize_paper_account()
     with _connect() as connection:
         return pd.read_sql_query(
@@ -162,6 +193,8 @@ def get_orders(limit=200):
 
 
 def place_order(side, stock_code, stock_name, quantity, price):
+    if is_remote_storage_enabled():
+        return cloud_paper.place_order(side, stock_code, stock_name, quantity, price)
     initialize_paper_account()
     side = str(side).upper()
     stock_code = str(stock_code).replace(".0", "").zfill(6)
@@ -233,6 +266,9 @@ def place_order(side, stock_code, stock_name, quantity, price):
 
 
 def reset_account():
+    if is_remote_storage_enabled():
+        cloud_paper.reset_account()
+        return
     initialize_paper_account()
     with _connect() as connection:
         connection.execute("BEGIN IMMEDIATE")

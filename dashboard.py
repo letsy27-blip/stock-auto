@@ -24,6 +24,8 @@ from paper_trading import (
     get_investor_profile,
     get_orders as get_paper_orders,
     get_positions as get_paper_positions,
+    is_paper_user_authenticated,
+    is_remote_storage_enabled,
     place_order as place_paper_order,
     record_behavior_event,
     reset_account as reset_paper_account,
@@ -33,6 +35,7 @@ from sector_theme_strength import (
     make_industry_strength,
     make_theme_strength,
 )
+from supabase_auth import show_auth_sidebar
 
 
 # 다크 모드에서 캔버스형 dataframe을 HTML 표로 대체할 때 원본 함수를 보관한다.
@@ -2367,6 +2370,9 @@ def make_top30_paper_buy_dialog():
 
     @st.dialog("모의 매수 확인", width="small")
     def paper_buy_popup(stock_name: str, stock_code: str, fallback_price: float = 0.0):
+        if is_remote_storage_enabled() and not is_paper_user_authenticated():
+            st.info("모의 매수는 로그인한 사용자 계정에만 저장됩니다. 왼쪽 메뉴에서 로그인해 주세요.")
+            return
         code = clean_code(stock_code)
         st.subheader(f"{stock_name} ({code})")
         st.caption("실제 주문은 전송되지 않습니다. 매수 실행 직전에 현재가를 한 번 더 조회합니다.")
@@ -4773,6 +4779,7 @@ def main():
         unsafe_allow_html=True,
     )
     apply_display_theme(selected_theme)
+    show_auth_sidebar()
 
     def sidebar_page_button(label, page, key):
         active = st.session_state["active_dashboard_page"] == page
@@ -4808,12 +4815,17 @@ def main():
     sidebar_page_button("거래 내역", "거래 내역", "nav_paper_history")
     sidebar_page_button("투자 성향", "투자 성향", "nav_investor_profile")
 
-    st.sidebar.markdown("## ⚙️ 관리")
-    sidebar_page_button("DB 상태", "DB 상태", "nav_db")
+    if not is_remote_storage_enabled():
+        st.sidebar.markdown("## ⚙️ 관리")
+        sidebar_page_button("DB 상태", "DB 상태", "nav_db")
 
     menu = st.session_state["active_dashboard_page"]
 
     if menu in {"모의 주문", "보유 종목", "거래 내역", "투자 성향"}:
+        if is_remote_storage_enabled() and not is_paper_user_authenticated():
+            st.header("내 모의투자")
+            st.info("모의 계좌·주문·투자 성향은 로그인한 본인에게만 저장됩니다. 왼쪽 메뉴에서 로그인해 주세요.")
+            return
         show_paper_trading(
             master_df=master_df,
             current_df=current_df,
@@ -4823,6 +4835,9 @@ def main():
         return
 
     if menu == "DB 상태":
+        if is_remote_storage_enabled():
+            st.session_state["active_dashboard_page"] = "홈"
+            st.rerun()
         show_db_status()
         return
 
