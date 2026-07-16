@@ -129,7 +129,7 @@ def sync_database_from_github() -> None:
         # 네트워크 문제여도 기존 DB로 대시보드는 계속 표시한다.
         st.session_state["db_sync_message"] = f"DB 동기화 보류: {exc}"
 
-st.set_page_config(page_title="주식 추천 대시보드", layout="wide")
+st.set_page_config(page_title="홍스탁 | 이유를 기록하는 주식 분석", layout="wide")
 
 st.markdown(
     """
@@ -4369,10 +4369,45 @@ def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"
 
 
 # -----------------------------
+# 시작 안내
+# -----------------------------
+def show_hongstock_welcome() -> bool:
+    """브라우저 세션에서 처음 한 번만 서비스 소개 팝업을 표시한다."""
+    if st.session_state.get("hongstock_welcome_seen", False):
+        return False
+
+    def dismiss_welcome():
+        st.session_state["hongstock_welcome_seen"] = True
+
+    @st.dialog("홍스탁에 오신 것을 환영합니다", width="large", on_dismiss=dismiss_welcome)
+    def welcome_dialog():
+        st.markdown("## 추천보다 **왜**를 기록하는 주식 분석")
+        st.markdown("홍스탁은 단순히 종목을 보여주는 프로그램이 아닙니다. 추천이 나온 근거와 실제 결과의 차이를 계속 기록해, 다음 판단을 더 나아지게 만드는 것을 목표로 합니다.")
+        left, right = st.columns(2)
+        with left:
+            st.markdown("### 왜 만들었나요?")
+            st.markdown("- 올랐는지보다 **왜 올랐는지** 확인\n- 틀렸다면 **어떤 근거가 부족했는지** 기록\n- 충동적인 진입보다 근거 있는 판단 연습")
+        with right:
+            st.markdown("### 어떻게 판단하나요?")
+            st.markdown("- 가격·거래량·수급·뉴스를 함께 분석\n- 지지선·저항선·돌파 신뢰도·추격 위험 반영\n- 추천 뒤 1·5·20일 결과와 이유를 DB에 축적")
+        st.info("매수 가능 TOP3와 관찰 후보를 구분합니다. 한 사례만으로 규칙을 바꾸지 않고, 충분한 데이터가 쌓인 뒤 개선합니다.")
+        st.caption("투자 판단의 보조 정보와 모의투자 도구입니다. 실제 투자 손익의 책임은 사용자에게 있습니다.")
+        if st.button("홍스탁 시작하기", type="primary", use_container_width=True):
+            st.session_state["hongstock_welcome_seen"] = True
+            st.rerun()
+
+    welcome_dialog()
+    return True
+
+
 # 메인
 # -----------------------------
 def main():
-    st.title("주식 추천 대시보드")
+    st.title("홍스탁")
+    st.caption("추천보다 이유를 기록하는 주식 분석")
+
+    if show_hongstock_welcome():
+        return
 
     # 화면을 열어 둔 상태에서도 1분마다 새 DB를 확인한다.
     st_autorefresh(
