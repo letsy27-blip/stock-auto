@@ -1,0 +1,79 @@
+name: Position risk monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 평일 한국시간 09:00~15:30. 스크립트에서도 정규장 여부를 다시 확인한다.
+    - cron: "*/5 0-6 * * 1-5"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hongstock-market-automation
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+      KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+      KIS_BASE_URL: ${{ secrets.KIS_BASE_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check whether positions exist
+        id: positions
+        shell: bash
+        run: |
+          count=$(python <<'PY'
+          import sqlite3
+
+          connection = sqlite3.connect("stock_data.db")
+          exists = connection.execute(
+              "SELECT COUNT(*) FROM sqlite_master "
+              "WHERE type='table' AND name='auto_strategy_positions'"
+          ).fetchone()[0]
+          count = connection.execute(
+              "SELECT COUNT(*) FROM auto_strategy_positions"
+          ).fetchone()[0] if exists else 0
+          print(count)
+          PY
+          )
+          echo "count=$count"
+          if [ "$count" -gt 0 ]; then
+            echo "has_positions=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_positions=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.positions.outputs.has_positions == 'true'
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - if: steps.positions.outputs.has_positions == 'true'
+        run: pip install -r requirements.txt
+      - if: steps.positions.outputs.has_positions == 'true'
+        run: python risk_monitor.py
+
+      - name: Commit changed trading state
+        if: steps.positions.outputs.has_positions == 'true'
+        run: |
+          if git diff --quiet -- stock_data.db; then
+            echo "No local trading-state change to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add stock_data.db
+          git commit -m "chore: update position risk state"
+          git push

@@ -19,6 +19,7 @@ from central_store import load_latest_scores
 from ai.gemini_client import DEFAULT_MODEL, stream_chat
 from kis_api import get_access_token, get_current_price
 from market_data import get_market_overview
+from market_regime import classify_market_regime
 from realtime_quotes import get_realtime_quote_hub
 from paper_trading import (
     get_account as get_paper_account,
@@ -2970,6 +2971,7 @@ def show_market_overview():
     temperature, temperature_label = (
         calculate_market_temperature(overview)
     )
+    regime = classify_market_regime(overview)
 
     col1, col2, col3, col4 = st.columns(4)
 
@@ -3005,6 +3007,15 @@ def show_market_overview():
         f"{temperature}점",
         temperature_label,
     )
+
+    regime_message = (
+        f"시장 국면: {regime['regime']} · 신규투자 허용 "
+        f"{regime['max_exposure'] * 100:.0f}% · {regime['reason']}"
+    )
+    if regime["regime"] in {"하락장", "급락장", "판단불가"}:
+        st.warning(regime_message)
+    else:
+        st.info(regime_message)
 
     errors = []
     for name, item in overview.items():

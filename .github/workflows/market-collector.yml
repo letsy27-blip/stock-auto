@@ -13,7 +13,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: korean-market-collector
+  group: hongstock-market-automation
   cancel-in-progress: false
 
 jobs:

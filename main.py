@@ -23,6 +23,8 @@ from news_analyzer import (
     analyze_news_by_stock_with_gemini,
     collect_news_for_candidates,
 )
+from market_data import get_market_overview
+from market_regime import classify_market_regime
 from portfolio import analyze_my_stocks
 from prediction_tracker import update_prediction_tracking
 from ranking import (
@@ -322,9 +324,16 @@ def run_once():
         financial_df=financial_df,
     )
 
+    market_regime = classify_market_regime(get_market_overview(token))
+    print(
+        f"시장 국면: {market_regime['regime']} · "
+        f"신규투자 허용 {market_regime['max_exposure'] * 100:.0f}% · "
+        f"{market_regime['reason']}"
+    )
     strategy_result = update_auto_strategies(
         scored_df=scored_df,
         chart_df=chart_history_df,
+        market_regime=market_regime,
     )
     prediction_saved, prediction_evaluated = update_prediction_tracking(
         scored_df=scored_df,
