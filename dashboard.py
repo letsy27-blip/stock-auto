@@ -6,6 +6,7 @@ import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
@@ -2955,6 +2956,29 @@ def calculate_market_temperature(overview):
     return score, label
 
 
+def next_market_analysis_time(now=None):
+    """다음 평일 09:00~15:30의 30분 분석 시각을 KST로 반환한다."""
+    kst = ZoneInfo("Asia/Seoul")
+    current = now or datetime.now(kst)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=kst)
+    else:
+        current = current.astimezone(kst)
+
+    candidate = current.replace(minute=0, second=0, microsecond=0)
+    candidate += timedelta(minutes=30 if current.minute < 30 else 60)
+    for _ in range(8 * 24 * 2 + 1):
+        if (
+            candidate.weekday() < 5
+            and (candidate.hour > 9 or (candidate.hour == 9 and candidate.minute >= 0))
+            and (candidate.hour < 15 or (candidate.hour == 15 and candidate.minute <= 30))
+            and candidate.minute in {0, 30}
+        ):
+            return candidate
+        candidate += timedelta(minutes=30)
+    return None
+
+
 def show_market_overview():
     st.header("시장 현황")
 
@@ -2972,6 +2996,19 @@ def show_market_overview():
         calculate_market_temperature(overview)
     )
     regime = classify_market_regime(overview)
+
+    next_analysis = next_market_analysis_time()
+    status_col1, status_col2 = st.columns(2)
+    status_col1.metric(
+        "현재 시장 국면",
+        regime["regime"],
+        f"신규투자 허용 {regime['max_exposure'] * 100:.0f}%",
+    )
+    status_col2.metric(
+        "다음 전체 분석 시각",
+        next_analysis.strftime("%m월 %d일 %H:%M") if next_analysis else "계산 불가",
+        "평일 30분 간격",
+    )
 
     col1, col2, col3, col4 = st.columns(4)
 
