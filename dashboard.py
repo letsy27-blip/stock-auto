@@ -368,7 +368,7 @@ def load_table(table_name: str) -> pd.DataFrame:
 
 def show_theme_aware_table(dataframe: pd.DataFrame, *args, **kwargs) -> None:
     """캔버스 데이터그리드 색상 문제를 피해 다크 테마에서도 표를 선명하게 표시한다."""
-    if st.session_state.get("dashboard_theme", "화이트") != "다크":
+    if st.session_state.get("dashboard_theme", "다크") != "다크":
         _NATIVE_DATAFRAME(dataframe, *args, **kwargs)
         return
 
@@ -557,6 +557,24 @@ def apply_display_theme(theme: str) -> None:
             background: #171B21 !important;
             color: #E5E7EB !important;
             border-color: #4B5563 !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stTextInput"] [data-baseweb="input"],
+        [data-testid="stSidebar"] [data-testid="stTextInput"] [data-baseweb="base-input"],
+        [data-testid="stSidebar"] [data-testid="stTextInput"] [data-baseweb="base-input"] > div,
+        [data-testid="stSidebar"] [data-testid="stTextInput"] input,
+        [data-testid="stSidebar"] [data-testid="stTextInput"] button {
+            background: #171B21 !important;
+            color: #E5E7EB !important;
+            border-color: #4B5563 !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stTextInput"] button svg {
+            color: #E5E7EB !important;
+            fill: #E5E7EB !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stForm"],
+        [data-testid="stSidebar"] [data-testid="stForm"] > div {
+            background: #171B21 !important;
+            border-color: #374151 !important;
         }
         [data-testid="stSelectbox"] [data-baseweb="select"],
         [data-testid="stSelectbox"] [data-baseweb="select"] > div,
@@ -5111,6 +5129,7 @@ def main():
         "화면 테마",
         ["화이트", "다크"],
         horizontal=True,
+        index=1,
         key="dashboard_theme",
     )
     # 다크에서는 Streamlit 캔버스 표가 검은 글자를 남기는 경우가 있어,
