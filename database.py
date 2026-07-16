@@ -6,7 +6,6 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -210,6 +209,12 @@ def _build_dedup_columns(
             ["종목코드", "기사발행일시", "뉴스제목"],
             ["저장일자", "종목코드", "뉴스제목"],
         ],
+        "financial": [
+            ["저장일자", "종목코드"],
+        ],
+        "intraday_snapshot": [
+            ["스냅샷일시", "종목코드"],
+        ],
     }
 
     for candidate in candidates_by_table.get(table_name, []):
@@ -326,6 +331,23 @@ def save_all_data(
     news_history_df: pd.DataFrame | None = None,
     financial_df: pd.DataFrame | None = None,
 ) -> None:
+    snapshot_df = pd.DataFrame()
+    if scored_df is not None and not scored_df.empty:
+        snapshot_time = datetime.now()
+        snapshot_df = scored_df.copy()
+        score_column = "최종점수" if "최종점수" in snapshot_df.columns else "총점"
+        if score_column in snapshot_df.columns:
+            snapshot_df[score_column] = pd.to_numeric(
+                snapshot_df[score_column], errors="coerce"
+            ).fillna(0)
+            snapshot_df = snapshot_df.sort_values(score_column, ascending=False)
+        snapshot_df = snapshot_df.drop_duplicates("종목코드", keep="first").reset_index(drop=True)
+        snapshot_df["현재순위"] = range(1, len(snapshot_df) + 1)
+        snapshot_df["스냅샷일자"] = snapshot_time.strftime("%Y-%m-%d")
+        snapshot_df["스냅샷시각"] = snapshot_time.strftime("%H:%M:%S")
+        snapshot_df["스냅샷일시"] = snapshot_time.strftime("%Y-%m-%d %H:%M:%S")
+        snapshot_df["갱신일시"] = snapshot_time.strftime("%Y-%m-%d %H:%M:%S")
+
     datasets = [
         ("portfolio", portfolio_df),
         ("volume_rank", volume_rank_df),
@@ -337,6 +359,7 @@ def save_all_data(
         ("supply_demand", supply_demand_df),
         ("news_history", news_history_df),
         ("financial", financial_df),
+        ("intraday_snapshot", snapshot_df),
     ]
 
     conn = _connect()
@@ -375,127 +398,6 @@ def save_all_data(
         "DB 저장 완료"
         + (f": {summary}" if summary else ": 저장할 데이터 없음")
     )
-
-
-def _load_latest_intraday_snapshot() -> pd.DataFrame:
-    """현재 DB에 저장된 가장 최근 장중 스냅샷을 읽는다."""
-    conn = _connect()
-    try:
-        columns = _get_existing_columns(conn, "intraday_snapshot")
-        required = {"스냅샷일시", "종목코드", "현재순위", "최종점수"}
-        if not required.issubset(columns):
-            return pd.DataFrame()
-
-        latest = conn.execute(
-            'SELECT MAX("스냅샷일시") FROM "intraday_snapshot"'
-        ).fetchone()[0]
-        if not latest:
-            return pd.DataFrame()
-
-        return pd.read_sql_query(
-            'SELECT "스냅샷일시", "종목코드", "종목명", "현재순위", "최종점수" '
-            'FROM "intraday_snapshot" WHERE "스냅샷일시" = ?',
-            conn,
-            params=(latest,),
-        )
-    finally:
-        conn.close()
-
-
-def _make_top30_events(
-    previous: pd.DataFrame,
-    current: pd.DataFrame,
-    snapshot_at: str,
-) -> pd.DataFrame:
-    """연속된 두 스냅샷에서 TOP30 진입·이탈 이벤트를 만든다."""
-    if previous.empty or current.empty:
-        return pd.DataFrame()
-
-    before = previous.rename(
-        columns={
-            "종목명": "이전종목명",
-            "현재순위": "이전순위",
-            "최종점수": "이전점수",
-        }
-    )
-    after = current.rename(
-        columns={
-            "종목명": "현재종목명",
-            "현재순위": "현재순위_신규",
-            "최종점수": "현재점수",
-        }
-    )
-    merged = after.merge(before, on="종목코드", how="outer")
-
-    events: list[dict[str, Any]] = []
-    for _, row in merged.iterrows():
-        previous_rank = pd.to_numeric(row.get("이전순위"), errors="coerce")
-        current_rank = pd.to_numeric(row.get("현재순위_신규"), errors="coerce")
-        was_top30 = pd.notna(previous_rank) and previous_rank <= 30
-        is_top30 = pd.notna(current_rank) and current_rank <= 30
-
-        event_type = ""
-        if is_top30 and not was_top30:
-            event_type = "TOP30 진입"
-        elif was_top30 and not is_top30:
-            event_type = "TOP30 이탈"
-
-        if not event_type:
-            continue
-
-        stock_name = row.get("현재종목명")
-        if pd.isna(stock_name) or not stock_name:
-            stock_name = row.get("이전종목명", "")
-
-        events.append(
-            {
-                "이벤트일시": snapshot_at,
-                "종목코드": str(row.get("종목코드", "")).zfill(6),
-                "종목명": stock_name,
-                "이벤트구분": event_type,
-                "이전점수": row.get("이전점수"),
-                "현재점수": row.get("현재점수"),
-                "이전순위": previous_rank,
-                "현재순위": current_rank,
-                "변동값": event_type,
-            }
-        )
-
-    return pd.DataFrame(events)
-
-
-def save_intraday_snapshot(scored_df: pd.DataFrame | None) -> tuple[int, int]:
-    """30분 추천 점수 스냅샷과 TOP30 진입·이탈 이벤트를 저장한다."""
-    if scored_df is None or scored_df.empty:
-        return 0, 0
-
-    required = {"종목코드", "종목명", "점수순위", "최종점수"}
-    if not required.issubset(scored_df.columns):
-        return 0, 0
-
-    snapshot_at = datetime.now(ZoneInfo("Asia/Seoul")).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-    previous = _load_latest_intraday_snapshot()
-
-    snapshot = scored_df[
-        ["종목코드", "종목명", "점수순위", "최종점수"]
-    ].copy()
-    snapshot["종목코드"] = snapshot["종목코드"].map(_clean_code)
-    snapshot = snapshot.rename(columns={"점수순위": "현재순위"})
-    snapshot["스냅샷일시"] = snapshot_at
-    snapshot = snapshot[
-        ["스냅샷일시", "종목코드", "종목명", "현재순위", "최종점수"]
-    ]
-
-    events = _make_top30_events(
-        previous=previous,
-        current=snapshot,
-        snapshot_at=snapshot_at,
-    )
-    snapshot_count = save_dataframe("intraday_snapshot", snapshot)
-    event_count = save_dataframe("market_event_history", events)
-    return snapshot_count, event_count
 
 
 def load_table(
