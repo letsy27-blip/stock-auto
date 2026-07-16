@@ -56,6 +56,19 @@ def current_user() -> dict[str, Any] | None:
     return user if isinstance(user, dict) and user.get("id") else None
 
 
+def is_admin_user(user: dict[str, Any] | None = None) -> bool:
+    """Return whether the signed-in user may open operator-only pages."""
+    # Keep this list in Secrets/.env, never in editable user profile data.
+    user = user or current_user()
+    email = str((user or {}).get("email") or "").strip().lower()
+    allowed = {
+        item.strip().lower()
+        for item in _setting("HONGSTOCK_ADMIN_EMAILS").split(",")
+        if item.strip()
+    }
+    return bool(email and email in allowed)
+
+
 def access_token() -> str | None:
     session = current_session()
     return str(session.get("access_token")) if session else None

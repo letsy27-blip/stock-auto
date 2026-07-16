@@ -35,7 +35,7 @@ from sector_theme_strength import (
     make_industry_strength,
     make_theme_strength,
 )
-from supabase_auth import show_auth_sidebar
+from supabase_auth import is_admin_user, show_auth_sidebar
 
 
 # 다크 모드에서 캔버스형 dataframe을 HTML 표로 대체할 때 원본 함수를 보관한다.
@@ -4779,7 +4779,8 @@ def main():
         unsafe_allow_html=True,
     )
     apply_display_theme(selected_theme)
-    show_auth_sidebar()
+    signed_in_user = show_auth_sidebar()
+    is_master_account = is_admin_user(signed_in_user)
 
     def sidebar_page_button(label, page, key):
         active = st.session_state["active_dashboard_page"] == page
@@ -4815,7 +4816,7 @@ def main():
     sidebar_page_button("거래 내역", "거래 내역", "nav_paper_history")
     sidebar_page_button("투자 성향", "투자 성향", "nav_investor_profile")
 
-    if not is_remote_storage_enabled():
+    if not is_remote_storage_enabled() or is_master_account:
         st.sidebar.markdown("## ⚙️ 관리")
         sidebar_page_button("DB 상태", "DB 상태", "nav_db")
 
@@ -4835,7 +4836,7 @@ def main():
         return
 
     if menu == "DB 상태":
-        if is_remote_storage_enabled():
+        if is_remote_storage_enabled() and not is_master_account:
             st.session_state["active_dashboard_page"] = "홈"
             st.rerun()
         show_db_status()

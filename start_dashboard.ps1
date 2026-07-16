@@ -4,7 +4,7 @@ $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PythonExe = Join-Path $env:USERPROFILE "venvs\PythonProject\Scripts\python.exe"
 $DashboardFile = Join-Path $ProjectDir "dashboard.py"
 $Port = 8501
-$DashboardUrl = "http://localhost:$Port"
+$DashboardUrl = "http://127.0.0.1:$Port"
 
 if (-not (Test-Path -LiteralPath $PythonExe)) {
     throw "대시보드용 Python을 찾을 수 없습니다: $PythonExe"
