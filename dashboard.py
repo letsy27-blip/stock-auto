@@ -2997,6 +2997,41 @@ def calculate_market_temperature(overview):
     return score, label
 
 
+def market_regime_quote(regime: str, now=None) -> str:
+    """현재 시장 국면에 맞는 짧은 투자 원칙을 순환해 보여준다."""
+    quotes = {
+        "상승장": [
+            "상승장에서도 원칙 없는 추격매수는 수익을 위험으로 바꾼다.",
+            "강한 시장일수록 수익은 길게, 손실은 짧게 관리한다.",
+            "오르는 종목을 사더라도 감당할 수 있는 가격에서만 산다.",
+        ],
+        "횡보장": [
+            "방향이 없을 때는 거래 횟수보다 좋은 자리 하나가 중요하다.",
+            "기회가 분명하지 않다면 기다림도 훌륭한 투자다.",
+            "횡보장에서는 추격보다 지지와 거래량을 확인한다.",
+        ],
+        "하락장": [
+            "떨어지는 칼날을 잡기보다 바닥이 확인될 때까지 기다린다.",
+            "하락장에서는 수익보다 손실을 작게 만드는 것이 먼저다.",
+            "현금을 지키는 것도 다음 기회를 사는 투자다.",
+        ],
+        "급락장": [
+            "수익보다 생존이 먼저다. 현금도 하나의 포지션이다.",
+            "급락장에서는 용기보다 규율이 계좌를 지킨다.",
+            "공포 속에서 서두르지 말고 시장이 진정되는 것을 확인한다.",
+        ],
+        "판단불가": [
+            "모르는 시장에서는 예측보다 확인이 먼저다.",
+            "정보가 부족할 때는 거래하지 않는 선택이 가장 정확하다.",
+            "확신이 아니라 근거가 생길 때까지 기다린다.",
+        ],
+    }
+    current = now or datetime.now()
+    choices = quotes.get(regime, quotes["판단불가"])
+    index = (current.toordinal() * 24 + current.hour) % len(choices)
+    return choices[index]
+
+
 def show_market_overview():
     st.header("시장 현황")
 
@@ -5044,7 +5079,11 @@ def show_hongstock_welcome() -> bool:
 # -----------------------------
 def main():
     st.title("HONG STOCK")
-    st.caption("추천보다 이유를 기록하는 주식 분석")
+    header_overview = load_market_overview_cached()
+    header_regime = classify_market_regime(
+        None if "error" in header_overview else header_overview
+    )
+    st.caption(market_regime_quote(header_regime["regime"]))
 
     # 집과 회사 모두 이 프로젝트 폴더에 있는 Google Drive 공용 DB만 사용한다.
 
