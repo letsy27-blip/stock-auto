@@ -576,6 +576,20 @@ def apply_display_theme(theme: str) -> None:
             border: 1px solid #4B5563 !important;
             border-radius: 7px !important;
         }
+        [data-testid="stSidebar"] [data-testid="stTextInputRootElement"],
+        [data-testid="stSidebar"] [data-testid="stTextInputRootElement"] > input,
+        [data-testid="stSidebar"] [data-testid="stTextInputRootElement"] > button {
+            background: #171B21 !important;
+            background-color: #171B21 !important;
+            color: #E5E7EB !important;
+            border-color: #4B5563 !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stTextInputRootElement"] {
+            border: 1px solid #4B5563 !important;
+            border-radius: 7px !important;
+            overflow: hidden !important;
+        }
         [data-testid="stSidebar"] [data-testid="stTextInput"] button svg {
             color: #E5E7EB !important;
             fill: #E5E7EB !important;
