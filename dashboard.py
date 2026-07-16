@@ -2861,7 +2861,7 @@ def show_recommendation_mini_chart(
             line_color="#94A3B8",
             line_width=2,
             line_dash="dot",
-            annotation_text=f"시가 {opening_price:,.0f}원",
+            annotation_text=f"당일 시작가 {opening_price:,.0f}원",
             annotation_font_color="#94A3B8",
             annotation_position="top right",
         )
@@ -2886,7 +2886,7 @@ def show_recommendation_mini_chart(
 
     if price and opening_price:
         opening_rate = ((price / opening_price) - 1) * 100
-        direction = "시가 대비 상승" if opening_rate >= 0 else "시가 대비 하락"
+        direction = "당일 시작가 대비 상승" if opening_rate >= 0 else "당일 시작가 대비 하락"
         container.caption(f"{direction} {opening_rate:+.2f}% · 빨강=상승 / 파랑=하락")
 
 
