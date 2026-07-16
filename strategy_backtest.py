@@ -107,6 +107,19 @@ def _make_signals(prices: pd.DataFrame) -> pd.DataFrame:
         (prices["종가"] < prices["MA5"])
         & (prices["MA5"] < prices["MA20"])
     )
+    prices["시장상승비율"] = prices.groupby("날짜")["추세점수"].transform("mean") / 100
+    prices["시장중앙5일수익률"] = prices.groupby("날짜")["수익률5"].transform("median")
+    crash = (prices["시장상승비율"] < 0.20) | (prices["시장중앙5일수익률"] <= -0.05)
+    bear = (prices["시장상승비율"] < 0.40) & (prices["시장중앙5일수익률"] < 0)
+    bull = (prices["시장상승비율"] >= 0.55) & (prices["시장중앙5일수익률"] > 0)
+    prices["시장국면"] = "횡보장"
+    prices.loc[bull, "시장국면"] = "상승장"
+    prices.loc[bear, "시장국면"] = "하락장"
+    prices.loc[crash, "시장국면"] = "급락장"
+    prices["시장투자비중"] = prices["시장국면"].map(
+        {"상승장": 1.0, "횡보장": 0.5, "하락장": 0.0, "급락장": 0.0}
+    )
+    prices["매수신호"] &= prices["시장투자비중"] > 0
     return prices.dropna(subset=["백테스트점수", "시가", "고가", "저가"])
 
 
@@ -114,10 +127,15 @@ def _run_strategy(signals: pd.DataFrame, capacity: int, trading_dates: list[pd.T
     cash = INITIAL_CASH
     positions: dict[str, Position] = {}
     trades: list[dict] = []
-    selection_by_date = {
-        day: group[group["매수신호"]].nlargest(capacity, "백테스트점수")
-        for day, group in signals[signals["날짜"].isin(trading_dates)].groupby("날짜")
-    }
+    selection_by_date = {}
+    for day, group in signals[signals["날짜"].isin(trading_dates)].groupby("날짜"):
+        exposure = float(group["시장투자비중"].iloc[-1])
+        allowed = int(capacity * exposure)
+        if exposure > 0 and allowed == 0:
+            allowed = 1
+        selection_by_date[day] = group[group["매수신호"]].nlargest(
+            allowed, "백테스트점수"
+        )
     row_by_date = {
         day: group.set_index("종목코드")
         for day, group in signals[signals["날짜"].isin(trading_dates)].groupby("날짜")
@@ -143,7 +161,9 @@ def _run_strategy(signals: pd.DataFrame, capacity: int, trading_dates: list[pd.T
             if isinstance(signal_quote, pd.DataFrame):
                 signal_quote = signal_quote.iloc[-1]
             # 전일 종가까지 확정된 분석 매도 신호는 다음 거래일 시가에 실행한다.
-            if signal_quote is not None and bool(signal_quote["매도신호"]):
+            if signal_quote is not None and signal_quote["시장국면"] == "급락장":
+                exit_price, reason = float(quote["시가"]), "시장 급락 위험회피"
+            elif signal_quote is not None and bool(signal_quote["매도신호"]):
                 exit_price, reason = float(quote["시가"]), "분석 매도 신호"
             # If both levels occur in one daily candle, use the stop first (conservative ordering).
             elif float(quote["저가"]) <= stop:

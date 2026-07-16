@@ -6,6 +6,7 @@ import sqlite3
 import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -16,10 +17,15 @@ BUY_FEE_RATE = 0.00015
 SELL_FEE_RATE = 0.00015
 SELL_TAX_RATE = 0.0018
 RISK_PER_TRADE = 0.01
+SELL_SLIPPAGE_RATE = 0.001
 STRATEGIES = {"TOP3": 3, "TOP30": 30}
 STRATEGY_START_DATE = date.fromisoformat(
     os.getenv("HONGSTOCK_STRATEGY_START_DATE", "2026-07-20")
 )
+
+
+def _now() -> datetime:
+    return datetime.now(ZoneInfo("Asia/Seoul"))
 
 
 def _connect() -> sqlite3.Connection:
@@ -43,7 +49,7 @@ def _number(value, default=0.0) -> float:
 
 
 def initialize_auto_strategies() -> None:
-    now = datetime.now().isoformat(timespec="seconds")
+    now = _now().isoformat(timespec="seconds")
     with _connect() as connection:
         connection.executescript(
             """
@@ -171,10 +177,89 @@ def _analysis_sell_reason(row: pd.Series | dict | None) -> str:
     return " · ".join(reasons)
 
 
-def update_auto_strategies(scored_df: pd.DataFrame, chart_df: pd.DataFrame) -> dict[str, int]:
+def _close_position(
+    connection: sqlite3.Connection,
+    position: sqlite3.Row,
+    exit_price: float,
+    exit_reason: str,
+    closed_at: str,
+) -> None:
+    gross = exit_price * position["quantity"]
+    exit_fee = gross * SELL_FEE_RATE
+    tax = gross * SELL_TAX_RATE
+    net_exit = gross - exit_fee - tax
+    cost = position["entry_price"] * position["quantity"] + position["entry_fee"]
+    profit = net_exit - cost
+    return_rate = profit / cost * 100 if cost else 0
+    connection.execute(
+        "INSERT INTO auto_strategy_trades (strategy, stock_code, stock_name, quantity, "
+        "entry_price, exit_price, entry_fee, exit_fee, tax, realized_profit, return_rate, "
+        "entry_score, entry_rank, opened_at, closed_at, exit_reason) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (position["strategy"], position["stock_code"], position["stock_name"],
+         position["quantity"], position["entry_price"], exit_price, position["entry_fee"],
+         exit_fee, tax, profit, return_rate, position["entry_score"], position["entry_rank"],
+         position["opened_at"], closed_at, exit_reason),
+    )
+    connection.execute(
+        "DELETE FROM auto_strategy_positions WHERE strategy=? AND stock_code=?",
+        (position["strategy"], position["stock_code"]),
+    )
+    connection.execute(
+        "UPDATE auto_strategy_accounts SET cash=cash+?, updated_at=? WHERE strategy=?",
+        (net_exit, closed_at, position["strategy"]),
+    )
+
+
+def get_open_position_codes() -> list[str]:
+    initialize_auto_strategies()
+    with _connect() as connection:
+        return [
+            row[0] for row in connection.execute(
+                "SELECT DISTINCT stock_code FROM auto_strategy_positions ORDER BY stock_code"
+            ).fetchall()
+        ]
+
+
+def monitor_open_position_risk(
+    live_prices: dict[str, float], market_regime: dict | None = None
+) -> dict[str, int]:
+    """보유종목만 빠르게 감시하고 실제 확인 가격에 슬리피지를 반영해 청산한다."""
+    initialize_auto_strategies()
+    now = _now().isoformat(timespec="seconds")
+    regime = str((market_regime or {}).get("regime", "판단불가"))
+    result = {"checked": 0, "closed": 0}
+    with _connect() as connection:
+        positions = connection.execute("SELECT * FROM auto_strategy_positions").fetchall()
+        for position in positions:
+            price = _number(live_prices.get(position["stock_code"]))
+            if price <= 0:
+                continue
+            result["checked"] += 1
+            reason = ""
+            if regime == "급락장":
+                reason = "시장 급락 위험회피"
+            elif price <= position["stop_price"]:
+                reason = "손절선 이탈"
+            elif price >= position["target_price"]:
+                reason = "목표가 도달"
+            if not reason:
+                continue
+            # 손절선을 건너뛴 급락도 손절가로 낙관하지 않고 확인된 현재가에서 체결한다.
+            exit_price = price * (1 - SELL_SLIPPAGE_RATE)
+            _close_position(connection, position, exit_price, reason, now)
+            result["closed"] += 1
+    return result
+
+
+def update_auto_strategies(
+    scored_df: pd.DataFrame,
+    chart_df: pd.DataFrame,
+    market_regime: dict | None = None,
+) -> dict[str, int]:
     """현재 추천만으로 진입·청산한다. 과거 가격을 보고 신호를 소급하지 않는다."""
     initialize_auto_strategies()
-    if datetime.now().date() < STRATEGY_START_DATE:
+    if _now().date() < STRATEGY_START_DATE:
         return {"opened": 0, "closed": 0}
     prices = _latest_prices(chart_df)
     candidates = _candidate_sets(scored_df)
@@ -186,7 +271,7 @@ def update_auto_strategies(scored_df: pd.DataFrame, chart_df: pd.DataFrame) -> d
         analysis_rows = {
             row["종목코드"]: row for _, row in latest_analysis.iterrows()
         }
-    now = datetime.now().isoformat(timespec="seconds")
+    now = _now().isoformat(timespec="seconds")
     result = {"opened": 0, "closed": 0}
     if not prices:
         return result
@@ -214,43 +299,19 @@ def update_auto_strategies(scored_df: pd.DataFrame, chart_df: pd.DataFrame) -> d
                 # 신호 발생 전의 당일 고가·저가를 체결로 소급하지 않기 위해
                 # 수집 시점의 최신 가격으로만 익절·손절을 판정한다.
                 if quote["close"] <= position["stop_price"]:
-                    exit_price, exit_reason = position["stop_price"], "손절가 도달"
+                    exit_price, exit_reason = quote["close"] * (1 - SELL_SLIPPAGE_RATE), "손절선 이탈"
                 elif quote["close"] >= position["target_price"]:
-                    exit_price, exit_reason = position["target_price"], "목표가 도달"
+                    exit_price, exit_reason = quote["close"] * (1 - SELL_SLIPPAGE_RATE), "목표가 도달"
                 else:
                     analysis_reason = _analysis_sell_reason(
                         analysis_rows.get(position["stock_code"])
                     )
                     if analysis_reason:
-                        exit_price = quote["close"]
+                        exit_price = quote["close"] * (1 - SELL_SLIPPAGE_RATE)
                         exit_reason = f"분석 매도 신호 · {analysis_reason}"
                 if exit_price is None:
                     continue
-                gross = exit_price * position["quantity"]
-                exit_fee = gross * SELL_FEE_RATE
-                tax = gross * SELL_TAX_RATE
-                net_exit = gross - exit_fee - tax
-                cost = position["entry_price"] * position["quantity"] + position["entry_fee"]
-                profit = net_exit - cost
-                return_rate = profit / cost * 100 if cost else 0
-                connection.execute(
-                    "INSERT INTO auto_strategy_trades (strategy, stock_code, stock_name, quantity, "
-                    "entry_price, exit_price, entry_fee, exit_fee, tax, realized_profit, return_rate, "
-                    "entry_score, entry_rank, opened_at, closed_at, exit_reason) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (strategy, position["stock_code"], position["stock_name"], position["quantity"],
-                     position["entry_price"], exit_price, position["entry_fee"], exit_fee, tax,
-                     profit, return_rate, position["entry_score"], position["entry_rank"],
-                     position["opened_at"], now, exit_reason),
-                )
-                connection.execute(
-                    "DELETE FROM auto_strategy_positions WHERE strategy=? AND stock_code=?",
-                    (strategy, position["stock_code"]),
-                )
-                connection.execute(
-                    "UPDATE auto_strategy_accounts SET cash=cash+?, updated_at=? WHERE strategy=?",
-                    (net_exit, now, strategy),
-                )
+                _close_position(connection, position, exit_price, exit_reason, now)
                 closed_codes.add(position["stock_code"])
                 result["closed"] += 1
 
@@ -262,7 +323,11 @@ def update_auto_strategies(scored_df: pd.DataFrame, chart_df: pd.DataFrame) -> d
                     "SELECT stock_code FROM auto_strategy_positions WHERE strategy=?", (strategy,)
                 ).fetchall()
             }
-            slots = max(0, capacity - len(held))
+            exposure = float((market_regime or {}).get("max_exposure", 0.0))
+            allowed_positions = int(capacity * exposure)
+            if exposure > 0 and allowed_positions == 0:
+                allowed_positions = 1
+            slots = max(0, allowed_positions - len(held))
             for rank, code in enumerate(candidate_df["종목코드"].tolist(), start=1):
                 if slots <= 0 or code in held or code in closed_codes or code not in prices:
                     continue
@@ -309,7 +374,7 @@ def update_auto_strategies(scored_df: pd.DataFrame, chart_df: pd.DataFrame) -> d
 def reset_auto_strategies() -> None:
     """시험 거래를 지우고 모든 자동 가상계좌를 초기 자금으로 되돌린다."""
     initialize_auto_strategies()
-    now = datetime.now().isoformat(timespec="seconds")
+    now = _now().isoformat(timespec="seconds")
     with _connect() as connection:
         connection.execute("DELETE FROM auto_strategy_positions")
         connection.execute("DELETE FROM auto_strategy_trades")
