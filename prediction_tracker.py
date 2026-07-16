@@ -187,18 +187,31 @@ def record_predictions(scored_df: pd.DataFrame, chart_history_df: pd.DataFrame) 
     return saved
 
 
-def _failure_reason(row: sqlite3.Row, return_rate: float) -> str:
+def _outcome_reason(row: sqlite3.Row, return_rate: float) -> str:
+    """결과를 원인 후보와 함께 기록한다. 단일 요인을 확정 원인으로 단정하지 않는다."""
     if return_rate > 0:
-        return "예측 방향 적중"
+        factors = []
+        if float(row["market_score"] or 0) >= 35:
+            factors.append("시장 강도")
+        if float(row["supply_score"] or 0) > 0:
+            factors.append("수급 매수 우위")
+        if float(row["news_score"] or 0) > 0:
+            factors.append("뉴스 모멘텀")
+        if float(row["timing_score"] or 0) > 0:
+            factors.append("진입 타이밍")
+        return "예측 방향 적중 · 당시 유효했던 근거 후보: " + (", ".join(factors) if factors else "추가 데이터 검토 필요")
+    factors = []
     if float(row["chase_risk"] or 0) >= 45:
-        return "급등·추격 위험이 실제 하락으로 이어짐"
+        factors.append("급등·추격 위험")
     if float(row["supply_score"] or 0) <= 0:
-        return "수급 매수 우위가 부족했음"
+        factors.append("수급 매수 우위 부족")
     if float(row["news_score"] or 0) <= 0:
-        return "뉴스 모멘텀이 약했음"
+        factors.append("뉴스 모멘텀 부족")
     if float(row["timing_score"] or 0) <= 0:
-        return "진입 타이밍 신호가 약했음"
-    return "시장 변동 또는 추가 요인 확인 필요"
+        factors.append("진입 타이밍 약함")
+    if not factors:
+        factors.append("시장 변동 또는 추가 요인")
+    return "예측과 반대 · 재검토 근거 후보: " + ", ".join(factors)
 
 
 def evaluate_predictions() -> int:
@@ -236,7 +249,7 @@ def evaluate_predictions() -> int:
                     updates[f"return_{days}d"] = round((close / entry_price - 1) * 100, 2)
                     updates[f"evaluated_price_{days}d"] = close
             if "return_5d" in updates:
-                updates["failure_reason"] = _failure_reason(prediction, updates["return_5d"])
+                updates["failure_reason"] = _outcome_reason(prediction, updates["return_5d"])
             if not updates:
                 continue
             assignments = ", ".join(f"{column} = ?" for column in updates)
