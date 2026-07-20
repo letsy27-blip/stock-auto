@@ -1,0 +1,82 @@
+name: Korean premarket analysis
+
+on:
+  workflow_dispatch:
+  schedule:
+    # UTC 전날 20:30 = 한국 시간 평일 05:30
+    # GitHub Actions 지연과 분석 시간을 감안해 오전 7시 게시 전에 충분히 완료한다.
+    - cron: "30 20 * * 0-4"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hongstock-market-automation
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TZ: Asia/Seoul
+      KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+      KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+      KIS_BASE_URL: ${{ secrets.KIS_BASE_URL }}
+      KIS_ACCOUNT_NO: ${{ secrets.KIS_ACCOUNT_NO }}
+      KIS_ACCOUNT_CODE: ${{ secrets.KIS_ACCOUNT_CODE }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      OPENDART_API_KEY: ${{ secrets.OPENDART_API_KEY }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      GEMINI_MODEL: gemini-2.5-flash
+      GEMINI_MAX_CALLS_PER_RUN: "8"
+      GEMINI_PRIORITY_STOCKS_PER_RUN: "8"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Analyze before market open
+        run: python main.py --premarket
+
+      - name: Verify today's premarket recommendations
+        run: |
+          python - <<'PY'
+          import sqlite3
+          from datetime import datetime
+
+          today = datetime.now().strftime("%Y-%m-%d")
+          with sqlite3.connect("stock_data.db") as conn:
+              count = conn.execute(
+                  'SELECT COUNT(*) FROM "premarket_score" WHERE "분석기준일" = ?',
+                  (today,),
+              ).fetchone()[0]
+
+          if count <= 0:
+              raise SystemExit(f"No premarket recommendations saved for {today}")
+          print(f"Verified {count} premarket recommendations for {today}")
+          PY
+
+      - name: Commit updated premarket data
+        run: |
+          if git diff --quiet -- stock_data.db; then
+            echo "Premarket analysis finished without updating stock_data.db."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add stock_data.db
+          git commit -m "chore: update premarket recommendations"
+          git push
