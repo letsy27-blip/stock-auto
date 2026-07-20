@@ -15,7 +15,11 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from auto_strategy import get_strategy_performance, get_top3_signal_status
-from central_store import load_latest_scores
+from central_store import (
+    get_shared_database_info,
+    get_shared_database_path,
+    load_latest_scores,
+)
 from ai.gemini_client import DEFAULT_MODEL, stream_chat
 from kis_api import get_access_token, get_current_price
 from market_data import get_market_overview
@@ -43,10 +47,10 @@ from strategy_backtest import run_walk_forward_backtest
 # 다크 모드에서 캔버스형 dataframe을 HTML 표로 대체할 때 원본 함수를 보관한다.
 _NATIVE_DATAFRAME = st.dataframe
 
-DB_PATH = Path(__file__).resolve().with_name("stock_data.db")
-DB_NAME = str(DB_PATH)
-
+LOCAL_DB_PATH = Path(__file__).resolve().with_name("stock_data.db")
 st.set_page_config(page_title="HONG STOCK | 이유를 기록하는 주식 분석", layout="wide")
+DB_PATH = get_shared_database_path(LOCAL_DB_PATH)
+DB_NAME = str(DB_PATH)
 
 st.markdown(
     """
@@ -349,20 +353,36 @@ def _database_version() -> int:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def _load_table_cached(table_name: str, database_version: int) -> pd.DataFrame:
-    conn = sqlite3.connect(DB_NAME)
+def _load_table_cached(
+    database_path: str,
+    table_name: str,
+    database_version: int,
+) -> pd.DataFrame:
+    conn = sqlite3.connect(database_path)
     try:
-        df = pd.read_sql(f'SELECT * FROM "{table_name}"', conn)
-    except Exception:
-        df = pd.DataFrame()
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        if not exists:
+            return pd.DataFrame()
+        return pd.read_sql(f'SELECT * FROM "{table_name}"', conn)
     finally:
         conn.close()
-    return df
 
 
 def load_table(table_name: str) -> pd.DataFrame:
     """30초 동안 같은 DB 읽기를 재사용하고, DB 변경 시 즉시 다시 읽는다."""
-    return _load_table_cached(table_name, _database_version())
+    return _load_table_cached(DB_NAME, table_name, _database_version())
+
+
+def load_local_table(table_name: str) -> pd.DataFrame:
+    """중앙 DB에 필요한 데이터가 없을 때만 번들 SQLite를 읽는다."""
+    try:
+        version = LOCAL_DB_PATH.stat().st_mtime_ns
+    except OSError:
+        version = 0
+    return _load_table_cached(str(LOCAL_DB_PATH), table_name, version)
 
 
 def show_theme_aware_table(dataframe: pd.DataFrame, *args, **kwargs) -> None:
@@ -758,6 +778,8 @@ def get_db_status() -> dict:
         "latest_dates": {},
         "duplicate_counts": {},
         "errors": [],
+        "source": "local",
+        "source_error": None,
     }
 
     if not os.path.exists(DB_NAME):
@@ -769,6 +791,14 @@ def get_db_status() -> dict:
     result["modified_at"] = datetime.fromtimestamp(
         os.path.getmtime(DB_NAME)
     )
+    shared_info = get_shared_database_info()
+    result["source"] = str(shared_info.get("source") or "local")
+    result["source_error"] = shared_info.get("error")
+    central_updated_at = pd.to_datetime(
+        shared_info.get("updated_at"), errors="coerce", utc=True
+    )
+    if pd.notna(central_updated_at):
+        result["modified_at"] = central_updated_at.tz_convert("Asia/Seoul").to_pydatetime().replace(tzinfo=None)
 
     conn = None
 
@@ -808,9 +838,14 @@ def get_db_status() -> dict:
                 date_column = None
 
                 for candidate in [
+                    "스냅샷일시",
+                    "분석생성일시",
+                    "이벤트일시",
+                    "최종갱신일자",
                     "저장일자",
                     "날짜",
                     "기준일자",
+                    "분석기준일",
                     "거래일자",
                 ]:
                     if candidate in columns:
@@ -987,7 +1022,7 @@ def show_db_status():
     )
 
     col3.metric(
-        "마지막 파일 변경",
+        "중앙 DB 갱신",
         modified_text,
     )
 
@@ -996,6 +1031,18 @@ def show_db_status():
         f"{health_score}점",
         health_grade,
     )
+
+    source_labels = {
+        "supabase": "Supabase 중앙 DB",
+        "supabase-cache": "Supabase 중앙 DB · 마지막 정상 캐시",
+        "local": "로컬 SQLite 대체본",
+    }
+    source_text = source_labels.get(status["source"], status["source"])
+    if status["source"] == "supabase":
+        st.success(f"현재 데이터 원본: {source_text}")
+    else:
+        detail = f" · {status['source_error']}" if status.get("source_error") else ""
+        st.warning(f"현재 데이터 원본: {source_text}{detail}")
 
     st.subheader("테이블 현황")
     st.caption(
@@ -1099,6 +1146,22 @@ def clean_code(code) -> str:
     return str(code).replace(".0", "").zfill(6)
 
 
+def normalize_kst_date(value) -> date | None:
+    """문자열·date·timestamp를 동일한 KST 기준 date로 바꾼다."""
+    timestamp = pd.to_datetime(value, errors="coerce")
+    if pd.isna(timestamp):
+        return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize("Asia/Seoul")
+    else:
+        timestamp = timestamp.tz_convert("Asia/Seoul")
+    return timestamp.date()
+
+
+def normalize_kst_date_series(series: pd.Series) -> pd.Series:
+    return series.map(normalize_kst_date)
+
+
 def normalize_score_df(score_df: pd.DataFrame) -> pd.DataFrame:
     if score_df.empty:
         return score_df
@@ -1106,7 +1169,7 @@ def normalize_score_df(score_df: pd.DataFrame) -> pd.DataFrame:
     df = score_df.copy()
 
     if "저장일자" in df.columns:
-        df["저장일자"] = pd.to_datetime(df["저장일자"], errors="coerce").dt.date
+        df["저장일자"] = normalize_kst_date_series(df["저장일자"])
     if "저장시간" not in df.columns:
         df["저장시간"] = "00:00:00"
     df["저장시간"] = df["저장시간"].fillna("00:00:00").astype(str)
@@ -2624,11 +2687,21 @@ def show_today_top(
     theme_history_df: pd.DataFrame,
     selected_date,
 ):
-    today_df = score_df[
-        score_df["저장일자"] == selected_date
+    selected_date = normalize_kst_date(selected_date)
+    normalized_score_df = score_df.copy()
+    if "저장일자" in normalized_score_df.columns:
+        normalized_score_df["저장일자"] = normalize_kst_date_series(
+            normalized_score_df["저장일자"]
+        )
+    today_df = normalized_score_df[
+        normalized_score_df.get("저장일자") == selected_date
     ].copy()
 
     st.subheader(f"{selected_date} 추천점수 TOP30")
+    st.caption(f"조회 날짜: {selected_date} · 조회 결과: {len(today_df):,}건")
+    if today_df.empty:
+        st.warning(f"{selected_date} 기준 추천 데이터가 없습니다. 날짜 형식과 데이터 원본을 확인해 주세요.")
+        return
     order_confirmation = st.session_state.pop("top30_paper_order_confirmation", None)
     if order_confirmation:
         st.success(order_confirmation)
@@ -3133,7 +3206,7 @@ def show_prediction_performance_summary(show_details: bool = True):
     else:
         st.subheader("오늘 수익률 요약")
         period = "일간"
-    summary, positions, trades = get_strategy_performance(period)
+    summary, positions, trades = get_strategy_performance(period, db_path=DB_PATH)
 
     now = pd.Timestamp.now()
     period_starts = {
@@ -3198,7 +3271,7 @@ def show_prediction_performance_summary(show_details: bool = True):
             f"보유 {int(row['보유종목'])}종목"
         )
 
-    top3_status = get_top3_signal_status()
+    top3_status = get_top3_signal_status(db_path=DB_PATH)
     if show_details:
         display = summary.rename(columns={"전략": "계좌"}).copy()
         display["계좌"] = display["계좌"].map(labels).fillna(display["계좌"])
@@ -3721,16 +3794,38 @@ def show_morning_briefing(history_df: pd.DataFrame, supply_df: pd.DataFrame):
     st.header("오늘 장 준비")
     today = pd.Timestamp.now().date()
     premarket_df = normalize_score_df(load_table("premarket_score"))
+    premarket_source = "Supabase 중앙 DB" if DB_PATH != LOCAL_DB_PATH else "로컬 SQLite"
     is_today_premarket = False
+    premarket_date = None
     generated_at = ""
 
-    if premarket_df is not None and not premarket_df.empty and "분석기준일" in premarket_df.columns:
-        premarket_df = premarket_df.copy()
-        premarket_df["분석기준일"] = pd.to_datetime(
-            premarket_df["분석기준일"], errors="coerce"
-        ).dt.date
-        briefing = premarket_df[premarket_df["분석기준일"] == today].copy()
-        is_today_premarket = not briefing.empty
+    def select_latest_premarket(frame: pd.DataFrame) -> tuple[pd.DataFrame, date | None]:
+        if frame is None or frame.empty or "분석기준일" not in frame.columns:
+            return pd.DataFrame(), None
+        candidate = frame.copy()
+        candidate["분석기준일"] = normalize_kst_date_series(
+            candidate["분석기준일"]
+        )
+        available_dates = candidate.loc[
+            candidate["분석기준일"].notna()
+            & (candidate["분석기준일"] <= today),
+            "분석기준일",
+        ]
+        if available_dates.empty:
+            return pd.DataFrame(), None
+        latest_date = max(available_dates)
+        return candidate[candidate["분석기준일"] == latest_date].copy(), latest_date
+
+    briefing, premarket_date = select_latest_premarket(premarket_df)
+    if briefing.empty and DB_PATH != LOCAL_DB_PATH:
+        local_premarket_df = normalize_score_df(load_local_table("premarket_score"))
+        briefing, premarket_date = select_latest_premarket(local_premarket_df)
+        if not briefing.empty:
+            premarket_source = "로컬 SQLite"
+
+    has_premarket = not briefing.empty
+    if has_premarket:
+        is_today_premarket = premarket_date == today
         if is_today_premarket and "분석생성일시" in briefing.columns:
             generated_values = pd.to_datetime(
                 briefing["분석생성일시"], errors="coerce"
@@ -3738,8 +3833,11 @@ def show_morning_briefing(history_df: pd.DataFrame, supply_df: pd.DataFrame):
             if not generated_values.empty:
                 generated_at = generated_values.max().strftime("%Y-%m-%d %H:%M")
 
-    if is_today_premarket:
-        st.caption("오전 7시 쇼츠용 장전 분석입니다. 전일 마감 가격과 최근 36시간 뉴스·공시를 반영하며, 장 시작 후 가격 행동을 다시 확인해야 합니다.")
+    if has_premarket:
+        if is_today_premarket:
+            st.caption(f"데이터 원본: {premarket_source} · 오전 7시 쇼츠용 장전 분석입니다. 전일 마감 가격과 최근 36시간 뉴스·공시를 반영하며, 장 시작 후 가격 행동을 다시 확인해야 합니다.")
+        else:
+            st.warning(f"오늘 장전 결과 없음 · {premarket_source}의 최신 장전 분석일: {premarket_date}")
         if "분석생성일시" in briefing.columns:
             briefing = briefing.sort_values("분석생성일시").drop_duplicates("종목코드", keep="last")
         market_dates = pd.to_datetime(
@@ -3787,10 +3885,10 @@ def show_morning_briefing(history_df: pd.DataFrame, supply_df: pd.DataFrame):
                 "기관3일": safe_float(recent3.get("기관순매수량", pd.Series(dtype=float)).sum()),
             }
 
-    if is_today_premarket:
+    if has_premarket:
         generation_text = f" · 생성 {generated_at}" if generated_at else ""
         st.info(
-            f"오늘 추천일: {today} · 시장 데이터 기준: {reference_date} 장 마감"
+            f"장전 분석일: {premarket_date} · 시장 데이터 기준: {reference_date} 장 마감"
             f"{generation_text} · 시초가와 거래량 확인 후 계획을 유지하거나 취소하세요."
         )
     else:
@@ -3825,7 +3923,7 @@ def show_morning_briefing(history_df: pd.DataFrame, supply_df: pd.DataFrame):
         rows.append(
             {
                 "종목": f"{row.get('종목명', code)} ({code})",
-                "장전점수" if is_today_premarket else "전일점수": safe_float(row.get(score_column, 0)),
+                "장전점수" if has_premarket else "전일점수": safe_float(row.get(score_column, 0)),
                 "오늘 계획": entry,
                 "관찰 조건": trigger,
                 "계획 취소": cancel,
@@ -5118,7 +5216,8 @@ def main():
     )
     st.caption(market_regime_quote(header_regime["regime"]))
 
-    # 집과 회사 모두 이 프로젝트 폴더에 있는 Google Drive 공용 DB만 사용한다.
+    # 집·회사·배포 환경 모두 Supabase의 검증된 전체 DB 스냅샷을 우선 사용한다.
+    # 중앙 연결 장애 때만 마지막 정상 캐시 또는 번들된 로컬 DB로 대체한다.
 
     all_score_df = normalize_score_df(
         load_table("score")
@@ -5136,7 +5235,8 @@ def main():
         current_df = normalize_score_df(central_df)
         if central_snapshot_at is not None:
             central_kst = central_snapshot_at.tz_convert("Asia/Seoul")
-            current_df["저장일자"] = central_kst.strftime("%Y-%m-%d")
+            if "저장일자" not in current_df.columns or current_df["저장일자"].isna().all():
+                current_df["저장일자"] = central_kst.date()
             current_df["저장시간"] = central_kst.strftime("%H:%M:%S")
     if current_df.empty and not snapshot_df.empty and "스냅샷일시" in snapshot_df.columns:
         snapshot_datetime = pd.to_datetime(
@@ -5274,7 +5374,7 @@ def main():
     sidebar_page_button("과거 분석", "과거 분석", "nav_history")
 
     st.sidebar.markdown("## 💰 모의투자")
-    sidebar_page_button("수익률", "수익률", "nav_strategy_performance")
+    sidebar_page_button("수익 분석", "수익률", "nav_strategy_performance")
     sidebar_page_button("모의 주문", "모의 주문", "nav_paper_order")
     sidebar_page_button("보유 종목", "보유 종목", "nav_paper_positions")
     sidebar_page_button("거래 내역", "거래 내역", "nav_paper_history")
@@ -5351,11 +5451,11 @@ def main():
             return
 
         display_df = current_df.copy()
-        available_dates = pd.to_datetime(
-            display_df.get("저장일자"), errors="coerce"
+        available_dates = normalize_kst_date_series(
+            display_df.get("저장일자", pd.Series(dtype=object))
         ).dropna()
         selected_date = (
-            available_dates.max().date()
+            available_dates.max()
             if not available_dates.empty else pd.Timestamp.now().date()
         )
 

@@ -7,11 +7,12 @@ import pandas as pd
 
 from auto_strategy import DB_PATH as STRATEGY_DB_PATH, initialize_auto_strategies, update_auto_strategies
 from central_store import (
+    publish_database_snapshot,
     publish_latest_scores,
     publish_strategy_state,
     restore_strategy_state,
 )
-from database import save_all_data, save_dataframe
+from database import DB_PATH as DATA_DB_PATH, save_all_data, save_dataframe
 from excel_writer import save_to_excel
 from financial_analyzer import collect_financial_metrics
 from kis_api import (
@@ -339,6 +340,14 @@ def run_once(premarket: bool = False):
         if saved_count <= 0:
             raise RuntimeError("장전 추천 결과가 비어 있어 저장하지 못했습니다.")
         print(f"장전 추천 저장 완료: {saved_count}개 종목 · {analysis_time:%Y-%m-%d %H:%M:%S}")
+        try:
+            snapshot_time = publish_database_snapshot(
+                DATA_DB_PATH,
+                source="github-actions-premarket" if os.getenv("GITHUB_ACTIONS") else "local-premarket",
+            )
+            print(f"중앙 전체 DB 스냅샷 갱신 완료: {snapshot_time}")
+        except Exception as exc:
+            print(f"중앙 전체 DB 스냅샷 갱신 건너뜀: {exc}")
         print("장전 분석 모드이므로 자동매매 전략과 장중 예측 상태는 갱신하지 않습니다.")
         return
 
@@ -371,6 +380,14 @@ def run_once(premarket: bool = False):
     except Exception as exc:
         # 수집 데이터는 로컬에도 먼저 저장되어 있으므로 중앙 장애가 수집 자체를 망치지 않게 한다.
         print(f"중앙 DB 갱신 건너뜀: {exc}")
+    try:
+        snapshot_time = publish_database_snapshot(
+            DATA_DB_PATH,
+            source="github-actions" if os.getenv("GITHUB_ACTIONS") else "local-collector",
+        )
+        print(f"중앙 전체 DB 스냅샷 갱신 완료: {snapshot_time}")
+    except Exception as exc:
+        print(f"중앙 전체 DB 스냅샷 갱신 건너뜀: {exc}")
     print(
         "자동전략 갱신: "
         f"가상 매수 {strategy_result['opened']}건, 가상 청산 {strategy_result['closed']}건"
