@@ -3719,25 +3719,51 @@ def show_realtime_recommendations(
 
 def show_morning_briefing(history_df: pd.DataFrame, supply_df: pd.DataFrame):
     st.header("오늘 장 준비")
-    st.caption("전일 마감 기준의 사전 관찰 계획입니다. 아래 현재 매수 판단과 종목이 달라질 수 있으며, 매수 확정 신호가 아닙니다.")
-
-    if history_df is None or history_df.empty or "저장일자" not in history_df.columns:
-        st.info("전일 마감 분석 데이터가 아직 없습니다.")
-        return
-
-    briefing = history_df.copy()
-    briefing["저장일자"] = pd.to_datetime(briefing["저장일자"], errors="coerce").dt.date
-    available_dates = sorted(briefing["저장일자"].dropna().unique())
-    if not available_dates:
-        st.info("분석 기준일을 확인할 수 없습니다.")
-        return
-
     today = pd.Timestamp.now().date()
-    previous_dates = [date for date in available_dates if date < today]
-    reference_date = max(previous_dates) if previous_dates else max(available_dates)
-    briefing = briefing[briefing["저장일자"] == reference_date].copy()
-    if "저장시간" in briefing.columns:
-        briefing = briefing.sort_values("저장시간").drop_duplicates("종목코드", keep="last")
+    premarket_df = normalize_score_df(load_table("premarket_score"))
+    is_today_premarket = False
+    generated_at = ""
+
+    if premarket_df is not None and not premarket_df.empty and "분석기준일" in premarket_df.columns:
+        premarket_df = premarket_df.copy()
+        premarket_df["분석기준일"] = pd.to_datetime(
+            premarket_df["분석기준일"], errors="coerce"
+        ).dt.date
+        briefing = premarket_df[premarket_df["분석기준일"] == today].copy()
+        is_today_premarket = not briefing.empty
+        if is_today_premarket and "분석생성일시" in briefing.columns:
+            generated_values = pd.to_datetime(
+                briefing["분석생성일시"], errors="coerce"
+            ).dropna()
+            if not generated_values.empty:
+                generated_at = generated_values.max().strftime("%Y-%m-%d %H:%M")
+
+    if is_today_premarket:
+        st.caption("오전 7시 쇼츠용 장전 분석입니다. 전일 마감 가격과 최근 36시간 뉴스·공시를 반영하며, 장 시작 후 가격 행동을 다시 확인해야 합니다.")
+        if "분석생성일시" in briefing.columns:
+            briefing = briefing.sort_values("분석생성일시").drop_duplicates("종목코드", keep="last")
+        market_dates = pd.to_datetime(
+            briefing.get("시장기준일", pd.Series(dtype=object)), errors="coerce"
+        ).dt.date.dropna()
+        reference_date = market_dates.max() if not market_dates.empty else today
+    else:
+        st.caption("오늘 장전 분석이 없어서 전일 마감 분석을 대신 표시합니다. 아래 현재 매수 판단과 종목이 달라질 수 있습니다.")
+        if history_df is None or history_df.empty or "저장일자" not in history_df.columns:
+            st.info("장전 또는 전일 마감 분석 데이터가 아직 없습니다.")
+            return
+
+        briefing = history_df.copy()
+        briefing["저장일자"] = pd.to_datetime(briefing["저장일자"], errors="coerce").dt.date
+        available_dates = sorted(briefing["저장일자"].dropna().unique())
+        if not available_dates:
+            st.info("분석 기준일을 확인할 수 없습니다.")
+            return
+
+        previous_dates = [date for date in available_dates if date < today]
+        reference_date = max(previous_dates) if previous_dates else max(available_dates)
+        briefing = briefing[briefing["저장일자"] == reference_date].copy()
+        if "저장시간" in briefing.columns:
+            briefing = briefing.sort_values("저장시간").drop_duplicates("종목코드", keep="last")
 
     score_column = "최종점수" if "최종점수" in briefing.columns else "총점"
     briefing[score_column] = pd.to_numeric(briefing[score_column], errors="coerce").fillna(0)
@@ -3761,7 +3787,14 @@ def show_morning_briefing(history_df: pd.DataFrame, supply_df: pd.DataFrame):
                 "기관3일": safe_float(recent3.get("기관순매수량", pd.Series(dtype=float)).sum()),
             }
 
-    st.info(f"분석 기준일: {reference_date} 장 마감 · 오늘은 시초가와 거래량을 확인한 뒤 계획을 유지하거나 취소하세요.")
+    if is_today_premarket:
+        generation_text = f" · 생성 {generated_at}" if generated_at else ""
+        st.info(
+            f"오늘 추천일: {today} · 시장 데이터 기준: {reference_date} 장 마감"
+            f"{generation_text} · 시초가와 거래량 확인 후 계획을 유지하거나 취소하세요."
+        )
+    else:
+        st.warning(f"오늘 장전 결과 없음 · 대체 분석 기준일: {reference_date} 장 마감")
     rows = []
     for _, row in briefing.iterrows():
         code = clean_code(row.get("종목코드", ""))
@@ -3792,7 +3825,7 @@ def show_morning_briefing(history_df: pd.DataFrame, supply_df: pd.DataFrame):
         rows.append(
             {
                 "종목": f"{row.get('종목명', code)} ({code})",
-                "전일점수": safe_float(row.get(score_column, 0)),
+                "장전점수" if is_today_premarket else "전일점수": safe_float(row.get(score_column, 0)),
                 "오늘 계획": entry,
                 "관찰 조건": trigger,
                 "계획 취소": cancel,
