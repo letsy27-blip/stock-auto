@@ -26,7 +26,7 @@ SHARED_DATABASE_KEY = "shared_database"
 _DB_CACHE_LOCK = threading.Lock()
 _DB_CACHE_LAST_CHECK = 0.0
 _DB_CACHE_INFO: dict[str, object] = {
-    "source": "local",
+    "source": "unavailable",
     "updated_at": None,
     "path": None,
     "error": None,
@@ -188,25 +188,36 @@ def _read_cache_metadata(path: Path) -> dict:
         return {}
 
 
-def get_shared_database_path(
-    local_fallback: str | os.PathLike,
-    min_check_seconds: int = 30,
-) -> Path:
-    """Return a validated central snapshot, falling back to the bundled local DB."""
+def get_shared_database_path(min_check_seconds: int = 30) -> Path:
+    """Return only a validated central snapshot or its last known-good cache."""
     global _DB_CACHE_LAST_CHECK, _DB_CACHE_INFO
 
-    fallback = Path(local_fallback).resolve()
+    cache_path, metadata_path = _shared_cache_paths()
     url, key = _settings(write=False)
     if not url or not key:
+        if cache_path.is_file():
+            try:
+                _validate_sqlite(cache_path)
+                cached_metadata = _read_cache_metadata(metadata_path)
+                _DB_CACHE_INFO = {
+                    "source": "supabase-cache",
+                    "updated_at": cached_metadata.get("updated_at"),
+                    "path": str(cache_path),
+                    "error": "Supabase read credentials are not configured",
+                }
+                return cache_path
+            except (OSError, ValueError, sqlite3.DatabaseError):
+                pass
         _DB_CACHE_INFO = {
-            "source": "local",
+            "source": "unavailable",
             "updated_at": None,
-            "path": str(fallback),
+            "path": None,
             "error": "Supabase read credentials are not configured",
         }
-        return fallback
+        raise RuntimeError(
+            "Supabase read credentials are required; local SQLite fallback is disabled"
+        )
 
-    cache_path, metadata_path = _shared_cache_paths()
     with _DB_CACHE_LOCK:
         now = time.monotonic()
         if (
@@ -307,12 +318,14 @@ def get_shared_database_path(
                 except (OSError, ValueError, sqlite3.DatabaseError):
                     pass
             _DB_CACHE_INFO = {
-                "source": "local",
+                "source": "unavailable",
                 "updated_at": None,
-                "path": str(fallback),
+                "path": None,
                 "error": str(exc),
             }
-            return fallback
+            raise RuntimeError(
+                "Supabase central database is unavailable and no valid central cache exists"
+            ) from exc
 
 
 def get_shared_database_info() -> dict[str, object]:
