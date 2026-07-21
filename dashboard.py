@@ -20,6 +20,13 @@ from central_store import (
     get_shared_database_path,
     load_latest_scores,
 )
+from dashboard_data import (
+    available_score_dates,
+    normalize_kst_date,
+    normalize_kst_date_series,
+    score_rows_for_date,
+    select_morning_briefing,
+)
 from ai.gemini_client import DEFAULT_MODEL, stream_chat
 from kis_api import get_access_token, get_current_price
 from market_data import get_market_overview
@@ -52,7 +59,7 @@ try:
     DB_PATH = get_shared_database_path()
 except RuntimeError as exc:
     st.error("중앙 Supabase DB에 연결할 수 없습니다.")
-    st.caption(f"로컬 SQLite 대체 조회는 비활성화되어 있습니다. 관리자 확인: {exc}")
+    st.caption(f"Supabase와 로컬 SQLite를 모두 조회할 수 없습니다. 관리자 확인: {exc}")
     st.stop()
     raise
 DB_NAME = str(DB_PATH)
@@ -1140,22 +1147,6 @@ def safe_float(value, default=0.0) -> float:
 
 def clean_code(code) -> str:
     return str(code).replace(".0", "").zfill(6)
-
-
-def normalize_kst_date(value) -> date | None:
-    """문자열·date·timestamp를 동일한 KST 기준 date로 바꾼다."""
-    timestamp = pd.to_datetime(value, errors="coerce")
-    if pd.isna(timestamp):
-        return None
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.tz_localize("Asia/Seoul")
-    else:
-        timestamp = timestamp.tz_convert("Asia/Seoul")
-    return timestamp.date()
-
-
-def normalize_kst_date_series(series: pd.Series) -> pd.Series:
-    return series.map(normalize_kst_date)
 
 
 def normalize_score_df(score_df: pd.DataFrame) -> pd.DataFrame:
@@ -2684,14 +2675,7 @@ def show_today_top(
     selected_date,
 ):
     selected_date = normalize_kst_date(selected_date)
-    normalized_score_df = score_df.copy()
-    if "저장일자" in normalized_score_df.columns:
-        normalized_score_df["저장일자"] = normalize_kst_date_series(
-            normalized_score_df["저장일자"]
-        )
-    today_df = normalized_score_df[
-        normalized_score_df.get("저장일자") == selected_date
-    ].copy()
+    today_df = score_rows_for_date(score_df, selected_date)
 
     st.subheader(f"{selected_date} 추천점수 TOP30")
     st.caption(f"조회 날짜: {selected_date} · 조회 결과: {len(today_df):,}건")
@@ -3789,31 +3773,37 @@ def show_realtime_recommendations(
 def show_morning_briefing(history_df: pd.DataFrame, supply_df: pd.DataFrame):
     st.header("오늘 장 준비")
     today = pd.Timestamp.now().date()
-    premarket_df = normalize_score_df(load_table("premarket_score"))
-    premarket_source = "Supabase 중앙 DB"
-    is_today_premarket = False
-    premarket_date = None
-    generated_at = ""
-
-    def select_latest_premarket(frame: pd.DataFrame) -> tuple[pd.DataFrame, date | None]:
-        if frame is None or frame.empty or "분석기준일" not in frame.columns:
-            return pd.DataFrame(), None
-        candidate = frame.copy()
-        candidate["분석기준일"] = normalize_kst_date_series(
-            candidate["분석기준일"]
+    storage_info = get_shared_database_info()
+    central_premarket = (
+        normalize_score_df(load_table("premarket_score"))
+        if storage_info.get("source") == "supabase"
+        else pd.DataFrame()
+    )
+    local_database = Path(__file__).resolve().parent / "stock_data.db"
+    local_premarket = pd.DataFrame()
+    if local_database.is_file() and local_database.resolve() != DB_PATH.resolve():
+        local_premarket = normalize_score_df(
+            _load_table_cached(
+                str(local_database),
+                "premarket_score",
+                local_database.stat().st_mtime_ns,
+            )
         )
-        available_dates = candidate.loc[
-            candidate["분석기준일"].notna()
-            & (candidate["분석기준일"] <= today),
-            "분석기준일",
-        ]
-        if available_dates.empty:
-            return pd.DataFrame(), None
-        latest_date = max(available_dates)
-        return candidate[candidate["분석기준일"] == latest_date].copy(), latest_date
+    elif storage_info.get("source") == "sqlite":
+        local_premarket = normalize_score_df(load_table("premarket_score"))
 
-    briefing, premarket_date = select_latest_premarket(premarket_df)
-    has_premarket = not briefing.empty
+    selection = select_morning_briefing(
+        central_premarket,
+        local_premarket,
+        history_df,
+        today,
+    )
+    premarket_source = selection.source
+    is_today_premarket = False
+    premarket_date = selection.data_date
+    generated_at = ""
+    briefing = selection.frame.copy()
+    has_premarket = selection.is_premarket
     if has_premarket:
         is_today_premarket = premarket_date == today
         if is_today_premarket and "분석생성일시" in briefing.columns:
@@ -3835,21 +3825,11 @@ def show_morning_briefing(history_df: pd.DataFrame, supply_df: pd.DataFrame):
         ).dt.date.dropna()
         reference_date = market_dates.max() if not market_dates.empty else today
     else:
-        st.caption("오늘 장전 분석이 없어서 전일 마감 분석을 대신 표시합니다. 아래 현재 매수 판단과 종목이 달라질 수 있습니다.")
-        if history_df is None or history_df.empty or "저장일자" not in history_df.columns:
+        st.caption("Supabase와 SQLite에 장전 분석이 없어 전일 마감 분석을 대신 표시합니다. 아래 현재 매수 판단과 종목이 달라질 수 있습니다.")
+        if briefing.empty or premarket_date is None:
             st.info("장전 또는 전일 마감 분석 데이터가 아직 없습니다.")
             return
-
-        briefing = history_df.copy()
-        briefing["저장일자"] = pd.to_datetime(briefing["저장일자"], errors="coerce").dt.date
-        available_dates = sorted(briefing["저장일자"].dropna().unique())
-        if not available_dates:
-            st.info("분석 기준일을 확인할 수 없습니다.")
-            return
-
-        previous_dates = [date for date in available_dates if date < today]
-        reference_date = max(previous_dates) if previous_dates else max(available_dates)
-        briefing = briefing[briefing["저장일자"] == reference_date].copy()
+        reference_date = premarket_date
         if "저장시간" in briefing.columns:
             briefing = briefing.sort_values("저장시간").drop_duplicates("종목코드", keep="last")
 
@@ -5443,18 +5423,20 @@ def main():
         return
 
     if menu == "추천 TOP30":
-        show_current_status_banner(current_df)
-
-        if current_df.empty:
+        if all_score_df.empty:
+            st.warning("추천점수 이력이 없습니다. 조회 결과: 0건")
             return
-
-        display_df = current_df.copy()
-        available_dates = normalize_kst_date_series(
-            display_df.get("저장일자", pd.Series(dtype=object))
-        ).dropna()
-        selected_date = (
-            available_dates.max()
-            if not available_dates.empty else pd.Timestamp.now().date()
+        display_df = all_score_df.copy()
+        dates = available_score_dates(display_df)
+        if not dates:
+            st.warning("추천점수의 저장일자를 확인할 수 없습니다. 조회 결과: 0건")
+            return
+        selected_date = st.selectbox(
+            "추천 조회 날짜",
+            dates,
+            index=0,
+            format_func=lambda value: value.strftime("%Y-%m-%d"),
+            key="top30_selected_date",
         )
 
         show_today_top(
