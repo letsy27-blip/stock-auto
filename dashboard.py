@@ -5248,6 +5248,12 @@ def show_hongstock_welcome() -> bool:
 
 # 메인
 # -----------------------------
+@st.cache_data(ttl=10, show_spinner=False)
+def load_latest_scores_cached():
+    """연속 메뉴 이동 중에는 같은 중앙 최신 순위를 다시 요청하지 않는다."""
+    return load_latest_scores()
+
+
 def main():
     if not is_auth_configured():
         st.error("Supabase 로그인 설정이 없어 대시보드를 열 수 없습니다.")
@@ -5278,7 +5284,7 @@ def main():
     # score 테이블에는 재분석 시점별 묶음이 함께 쌓이므로 단순히 가장 늦게
     # 저장된 묶음을 고르면 다른 PC에서 보던 장 마감 순위와 달라질 수 있다.
     current_df = pd.DataFrame()
-    central_df, central_snapshot_at = load_latest_scores()
+    central_df, central_snapshot_at = load_latest_scores_cached()
     if not central_df.empty:
         current_df = normalize_score_df(central_df)
         if central_snapshot_at is not None:
@@ -5414,16 +5420,19 @@ def main():
     signed_in_user = show_auth_sidebar()
     is_master_account = is_admin_user(signed_in_user)
 
+    def activate_sidebar_page(page):
+        st.session_state["active_dashboard_page"] = page
+
     def sidebar_page_button(label, page, key):
         active = st.session_state["active_dashboard_page"] == page
-        if st.sidebar.button(
+        st.sidebar.button(
             label,
             key=key,
             use_container_width=True,
             type="primary" if active else "secondary",
-        ):
-            st.session_state["active_dashboard_page"] = page
-            st.rerun()
+            on_click=activate_sidebar_page,
+            args=(page,),
+        )
 
     st.sidebar.markdown("## 🏠 홈")
     sidebar_page_button("홈", "홈", "nav_home")
