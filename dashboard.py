@@ -3328,12 +3328,17 @@ def show_prediction_performance_summary(show_details: bool = True):
             })
     summary = pd.concat([summary, pd.DataFrame([manual])], ignore_index=True)
 
-    cards = st.columns(3)
     labels = {
-        "TOP3": "TOP3 수익률", "TOP30": "TOP30 수익률",
+        "USER_TOP3": "내 기존전략 TOP3",
+        "USER_TOP30": "내 기존전략 TOP30",
+        "TOP3": "보완 그림자전략 TOP3",
+        "TOP30": "보완 그림자전략 TOP30",
         "내 모의투자": "모의투자 수익률",
         "내 모의투자(로그인 필요)": "모의투자 수익률 · 로그인 필요",
     }
+    cards = []
+    for start in range(0, len(summary), 3):
+        cards.extend(st.columns(min(3, len(summary) - start)))
     for card, (_, row) in zip(cards, summary.iterrows()):
         rate = row["성공률(%)"]
         card.metric(
@@ -3355,6 +3360,11 @@ def show_prediction_performance_summary(show_details: bool = True):
 
     top3_status = get_top3_signal_status(db_path=DB_PATH)
     if show_details:
+        st.info(
+            "내 기존전략은 최종점수·추천 순위로 자동 매수·매도하고, "
+            "보완 그림자전략은 돌파·추격위험·RSI·수급·시장상태를 추가로 확인합니다. "
+            "기존 그림자 기록은 유지되며 내 기존전략의 비교 기록은 이번 배포 이후부터 쌓입니다."
+        )
         display = summary.rename(columns={"전략": "계좌"}).copy()
         display["계좌"] = display["계좌"].map(labels).fillna(display["계좌"])
         display["성공률(%)"] = display["성공률(%)"].map(
@@ -3376,7 +3386,7 @@ def show_prediction_performance_summary(show_details: bool = True):
                     "분석 매수 신호가 발생하면 진입하고, 분석 매도 신호가 발생하면 청산합니다. 목표가·손절가는 안전장치입니다."
                 )
 
-        with st.expander("결합전략 그림자 검증 · 실제 일봉 한 달 워크포워드 백테스트", expanded=True):
+        with st.expander("결합전략 그림자 검증 · 보완 그림자전략 실제 일봉 한 달 워크포워드 백테스트", expanded=True):
             st.warning(
                 "과거 실제 일봉을 날짜순으로 재생한 백테스트입니다. 당시의 완전한 뉴스·수급 스냅샷은 "
                 "4일치뿐이므로 가격 추세·거래량으로 매일 순위를 재산출한 결과이며 미래 수익을 보장하지 않습니다."

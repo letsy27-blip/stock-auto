@@ -18,7 +18,7 @@ SELL_FEE_RATE = 0.00015
 SELL_TAX_RATE = 0.0018
 RISK_PER_TRADE = 0.01
 SELL_SLIPPAGE_RATE = 0.001
-STRATEGIES = {"TOP3": 3, "TOP30": 30}
+STRATEGIES = {"TOP3": 3, "TOP30": 30, "USER_TOP3": 3, "USER_TOP30": 30}
 STRATEGY_START_DATE = date.fromisoformat(
     os.getenv("HONGSTOCK_STRATEGY_START_DATE", "2026-07-20")
 )
@@ -157,7 +157,30 @@ def _candidate_sets(scored_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
         & rsi.between(45, 68)
         & (supply >= 0)
     ]
-    return {"TOP3": buyable.head(3), "TOP30": buyable.head(30)}
+    # The user's original method is the score analyzer's own recommendation/ranking.
+    # Keep it independent from the stricter shadow filters above so both methods can
+    # be measured under separate paper accounts without rewriting old history.
+    user_buyable = frame[recommendation.isin(["강력관심", "관심"])]
+    return {
+        "TOP3": buyable.head(3),
+        "TOP30": buyable.head(30),
+        "USER_TOP3": user_buyable.head(3),
+        "USER_TOP30": user_buyable.head(30),
+    }
+
+
+def _is_user_strategy(strategy: str) -> bool:
+    return str(strategy).startswith("USER_")
+
+
+def _user_sell_reason(row: pd.Series | dict | None) -> str:
+    """Sell only when the original score recommendation itself turns weak."""
+    if row is None:
+        return ""
+    recommendation = str(row.get("최종추천", "") or "").strip()
+    if recommendation in {"약세", "제외"}:
+        return f"추천 {recommendation}"
+    return ""
 
 
 def _analysis_sell_reason(row: pd.Series | dict | None) -> str:
@@ -237,7 +260,7 @@ def monitor_open_position_risk(
                 continue
             result["checked"] += 1
             reason = ""
-            if regime == "급락장":
+            if regime == "급락장" and not _is_user_strategy(position["strategy"]):
                 reason = "시장 급락 위험회피"
             elif price <= position["stop_price"]:
                 reason = "손절선 이탈"
@@ -303,9 +326,11 @@ def update_auto_strategies(
                 elif quote["close"] >= position["target_price"]:
                     exit_price, exit_reason = quote["close"] * (1 - SELL_SLIPPAGE_RATE), "목표가 도달"
                 else:
-                    analysis_reason = _analysis_sell_reason(
-                        analysis_rows.get(position["stock_code"])
+                    sell_reason = (
+                        _user_sell_reason if _is_user_strategy(strategy)
+                        else _analysis_sell_reason
                     )
+                    analysis_reason = sell_reason(analysis_rows.get(position["stock_code"]))
                     if analysis_reason:
                         exit_price = quote["close"] * (1 - SELL_SLIPPAGE_RATE)
                         exit_reason = f"분석 매도 신호 · {analysis_reason}"
@@ -323,7 +348,10 @@ def update_auto_strategies(
                     "SELECT stock_code FROM auto_strategy_positions WHERE strategy=?", (strategy,)
                 ).fetchall()
             }
-            exposure = float((market_regime or {}).get("max_exposure", 0.0))
+            exposure = (
+                1.0 if _is_user_strategy(strategy)
+                else float((market_regime or {}).get("max_exposure", 0.0))
+            )
             allowed_positions = int(capacity * exposure)
             if exposure > 0 and allowed_positions == 0:
                 allowed_positions = 1
@@ -342,11 +370,16 @@ def update_auto_strategies(
                 reward = target - price
                 if not (price * 0.90 <= stop < price and price < target <= price * 1.30):
                     continue
-                if risk / price < 0.01 or reward / risk < 1.5:
+                if not _is_user_strategy(strategy) and (
+                    risk / price < 0.01 or reward / risk < 1.5
+                ):
                     continue
                 quantity_by_cash = int(allocation / (price * (1 + BUY_FEE_RATE)))
-                quantity_by_risk = int((INITIAL_CASH * RISK_PER_TRADE) / risk)
-                quantity = min(quantity_by_cash, quantity_by_risk)
+                if _is_user_strategy(strategy):
+                    quantity = quantity_by_cash
+                else:
+                    quantity_by_risk = int((INITIAL_CASH * RISK_PER_TRADE) / risk)
+                    quantity = min(quantity_by_cash, quantity_by_risk)
                 if quantity < 1:
                     continue
                 entry_fee = price * quantity * BUY_FEE_RATE
