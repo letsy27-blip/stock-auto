@@ -432,6 +432,20 @@ def show_theme_aware_table(dataframe: pd.DataFrame, *args, **kwargs) -> None:
     )
 
 
+def show_theme_aware_plotly_chart(figure, *, container=None, **kwargs) -> None:
+    """Plotly 차트도 현재 대시보드 테마와 같은 배경·글자색으로 표시한다."""
+    is_dark_theme = st.session_state.get("dashboard_theme", "다크") == "다크"
+    figure.update_layout(
+        template="plotly_dark" if is_dark_theme else "plotly_white",
+        paper_bgcolor="#101317" if is_dark_theme else "#FFFFFF",
+        plot_bgcolor="#101317" if is_dark_theme else "#FFFFFF",
+        font_color="#E5E7EB" if is_dark_theme else "#111827",
+        legend_bgcolor="rgba(0,0,0,0)",
+    )
+    target = container if container is not None else st
+    target.plotly_chart(figure, **kwargs)
+
+
 def format_paper_positions_for_display(positions: pd.DataFrame) -> pd.DataFrame:
     """모의 보유종목의 금액·수익률을 읽기 쉬운 표기법으로 바꾼다."""
     display = positions.rename(
@@ -461,6 +475,7 @@ def apply_display_theme(theme: str) -> None:
     st.markdown(
         """
         <style>
+        [data-testid="stApp"],
         [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
             background: #101317;
             color: #E5E7EB;
@@ -675,12 +690,33 @@ def apply_display_theme(theme: str) -> None:
         }
         [data-testid="stSelectbox"] [data-baseweb="select"] *,
         [data-testid="stSelectbox"] [data-baseweb="select"] > div > div,
+        [data-testid="stSelectbox"] [role="group"],
+        [data-testid="stSelectbox"] [role="group"] input,
+        [data-testid="stSelectbox"] [role="group"] button,
         [data-testid="stNumberInput"] [data-baseweb="base-input"],
         [data-testid="stNumberInput"] [data-baseweb="base-input"] > div,
         [data-testid="stNumberInput"] button {
             background: #171B21 !important;
             color: #E5E7EB !important;
             border-color: #4B5563 !important;
+        }
+        a[data-testid^="stBaseLinkButton"],
+        [data-testid="stLinkButton"] a {
+            background: #202833 !important;
+            color: #E5E7EB !important;
+            border-color: #4B5563 !important;
+        }
+        a[data-testid^="stBaseLinkButton"]:hover,
+        [data-testid="stLinkButton"] a:hover {
+            background: #263B55 !important;
+            color: #FFFFFF !important;
+            border-color: #60A5FA !important;
+        }
+        .modebar-group {
+            background: rgba(23, 27, 33, 0.88) !important;
+        }
+        .modebar-btn path {
+            fill: #D1D5DB !important;
         }
         [role="listbox"], [role="listbox"] *,
         [data-baseweb="popover"] > div,
@@ -1766,7 +1802,7 @@ def show_price_volume_charts(chart_df: pd.DataFrame, stock_name: str, stock_code
         markers=True,
         title=f"{stock_name} {interval} 종가 추이",
     )
-    st.plotly_chart(fig_price, use_container_width=True)
+    show_theme_aware_plotly_chart(fig_price, use_container_width=True)
 
     if chart_data["거래량"].notna().any():
         fig_volume = px.bar(
@@ -1775,7 +1811,7 @@ def show_price_volume_charts(chart_df: pd.DataFrame, stock_name: str, stock_code
             y="거래량",
             title=f"{stock_name} {interval} 거래량",
         )
-        st.plotly_chart(fig_volume, use_container_width=True)
+        show_theme_aware_plotly_chart(fig_volume, use_container_width=True)
 
 
 
@@ -2027,7 +2063,7 @@ def show_supply_analysis(
                 barmode="group",
                 title="최근 5거래일 투자자별 매매동향",
             )
-            st.plotly_chart(
+            show_theme_aware_plotly_chart(
                 fig,
                 use_container_width=True,
             )
@@ -2346,7 +2382,7 @@ def show_stock_detail_by_code(
             markers=True,
             title=f"{stock_name} 시장·뉴스·최종점수 추이",
         )
-        st.plotly_chart(fig_score, use_container_width=True)
+        show_theme_aware_plotly_chart(fig_score, use_container_width=True)
 
     show_price_volume_charts(chart_df, stock_name, stock_code)
 
@@ -3460,7 +3496,7 @@ def _show_strength_chart(
             ),
         },
     )
-    st.plotly_chart(
+    show_theme_aware_plotly_chart(
         fig,
         use_container_width=True,
     )
@@ -3617,8 +3653,9 @@ def show_recommendation_mini_chart(
         xaxis={"rangeslider": {"visible": False}, "showgrid": False},
         yaxis={"tickformat": ",.0f", "showgrid": True, "gridcolor": "#334155"},
     )
-    container.plotly_chart(
+    show_theme_aware_plotly_chart(
         figure,
+        container=container,
         use_container_width=True,
         config={"displayModeBar": False},
     )
