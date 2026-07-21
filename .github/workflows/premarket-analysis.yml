@@ -8,7 +8,7 @@ on:
     - cron: "30 20 * * 0-4"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: hongstock-market-automation
@@ -48,6 +48,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Restore authoritative Supabase database
+        run: |
+          python - <<'PY'
+          from central_store import restore_database_snapshot
+          print(f"Restored central database: {restore_database_snapshot('stock_data.db')}")
+          PY
+
       - name: Analyze before market open
         run: python main.py --premarket
 
@@ -68,15 +75,3 @@ jobs:
               raise SystemExit(f"No premarket recommendations saved for {today}")
           print(f"Verified {count} premarket recommendations for {today}")
           PY
-
-      - name: Commit updated premarket data
-        run: |
-          if git diff --quiet -- stock_data.db; then
-            echo "Premarket analysis finished without updating stock_data.db."
-            exit 1
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add stock_data.db
-          git commit -m "chore: update premarket recommendations"
-          git push

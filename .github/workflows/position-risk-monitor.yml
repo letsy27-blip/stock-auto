@@ -7,7 +7,7 @@ on:
     - cron: "*/5 0-6 * * 1-5"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: hongstock-market-automation
@@ -39,44 +39,27 @@ jobs:
           count=$(python <<'PY'
           import json
           import os
-          import sqlite3
-          import sys
           import urllib.parse
           import urllib.request
 
-          count = None
           url = os.environ.get("SUPABASE_URL", "").rstrip("/")
           key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-          if url and key:
-              try:
-                  query = urllib.parse.urlencode({
-                      "key": "eq.auto_strategy_state",
-                      "select": "value",
-                      "limit": "1",
-                  })
-                  request = urllib.request.Request(
-                      f"{url}/rest/v1/hongstock_state?{query}",
-                      headers={"apikey": key, "Authorization": f"Bearer {key}"},
-                  )
-                  with urllib.request.urlopen(request, timeout=20) as response:
-                      rows = json.load(response)
-                  records = (((rows[0] if rows else {}).get("value") or {})
-                             .get("tables") or {}).get("auto_strategy_positions")
-                  if records is not None:
-                      count = len(records)
-              except Exception as exc:
-                  print(f"Central position check failed; using repository snapshot: {exc}",
-                        file=sys.stderr)
-
-          if count is None:
-              connection = sqlite3.connect("stock_data.db")
-              exists = connection.execute(
-                  "SELECT COUNT(*) FROM sqlite_master "
-                  "WHERE type='table' AND name='auto_strategy_positions'"
-              ).fetchone()[0]
-              count = connection.execute(
-                  "SELECT COUNT(*) FROM auto_strategy_positions"
-              ).fetchone()[0] if exists else 0
+          if not url or not key:
+              raise RuntimeError("Supabase central-store secrets are required")
+          query = urllib.parse.urlencode({
+              "key": "eq.auto_strategy_state",
+              "select": "value",
+              "limit": "1",
+          })
+          request = urllib.request.Request(
+              f"{url}/rest/v1/hongstock_state?{query}",
+              headers={"apikey": key, "Authorization": f"Bearer {key}"},
+          )
+          with urllib.request.urlopen(request, timeout=20) as response:
+              rows = json.load(response)
+          records = (((rows[0] if rows else {}).get("value") or {})
+                     .get("tables") or {}).get("auto_strategy_positions") or []
+          count = len(records)
           print(count)
           PY
           )
@@ -97,16 +80,3 @@ jobs:
         run: pip install -r requirements.txt
       - if: steps.positions.outputs.has_positions == 'true'
         run: python risk_monitor.py
-
-      - name: Commit changed trading state
-        if: steps.positions.outputs.has_positions == 'true'
-        run: |
-          if git diff --quiet -- stock_data.db; then
-            echo "No local trading-state change to commit."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add stock_data.db
-          git commit -m "chore: update position risk state"
-          git push

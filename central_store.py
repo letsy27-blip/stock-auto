@@ -7,6 +7,7 @@ import gzip
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import threading
@@ -39,6 +40,7 @@ def _settings(write: bool = False) -> tuple[str, str]:
     key = os.getenv(key_name, "")
     if not key and not write:
         key = os.getenv("SUPABASE_PUBLISHABLE_KEY", "")
+        key = key or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
     if not url or not key:
         try:
             import streamlit as st
@@ -49,6 +51,7 @@ def _settings(write: bool = False) -> tuple[str, str]:
             else:
                 key = key or str(st.secrets.get("SUPABASE_ANON_KEY", ""))
                 key = key or str(st.secrets.get("SUPABASE_PUBLISHABLE_KEY", ""))
+                key = key or str(st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", ""))
         except Exception:
             pass
     return url, key
@@ -326,6 +329,30 @@ def get_shared_database_path(min_check_seconds: int = 30) -> Path:
             raise RuntimeError(
                 "Supabase central database is unavailable and no valid central cache exists"
             ) from exc
+
+
+def restore_database_snapshot(target_path: str | os.PathLike) -> Path:
+    """Restore the authoritative Supabase snapshot into a worker database."""
+    source_path = get_shared_database_path(min_check_seconds=0)
+    target = Path(target_path).resolve()
+    if source_path.resolve() == target:
+        return target
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".central.tmp")
+    shutil.copy2(source_path, temporary)
+    try:
+        _validate_sqlite(temporary)
+        try:
+            os.replace(temporary, target)
+        except PermissionError:
+            # Windows can reject replacing an existing SQLite file even after
+            # its handles are closed. This only overwrites the worker copy.
+            shutil.copy2(temporary, target)
+        _validate_sqlite(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
 
 
 def get_shared_database_info() -> dict[str, object]:
