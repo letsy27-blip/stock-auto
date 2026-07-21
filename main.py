@@ -329,6 +329,8 @@ def run_once(premarket: bool = False):
     if premarket:
         analysis_time = datetime.now()
         premarket_df = scored_df.copy()
+        premarket_df["저장일자"] = analysis_time.strftime("%Y-%m-%d")
+        premarket_df["저장시간"] = analysis_time.strftime("%H:%M:%S")
         premarket_df["분석구분"] = "장전"
         premarket_df["분석기준일"] = analysis_time.strftime("%Y-%m-%d")
         premarket_df["분석생성일시"] = analysis_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -340,6 +342,18 @@ def run_once(premarket: bool = False):
         if saved_count <= 0:
             raise RuntimeError("장전 추천 결과가 비어 있어 저장하지 못했습니다.")
         print(f"장전 추천 저장 완료: {saved_count}개 종목 · {analysis_time:%Y-%m-%d %H:%M:%S}")
+        try:
+            central_time = publish_latest_scores(
+                premarket_df,
+                source=(
+                    "github-actions-premarket"
+                    if os.getenv("GITHUB_ACTIONS")
+                    else "local-premarket"
+                ),
+            )
+            print(f"중앙 최신 추천 갱신 완료: {central_time}")
+        except Exception as exc:
+            print(f"중앙 최신 추천 갱신 건너뜀: {exc}")
         try:
             snapshot_time = publish_database_snapshot(
                 DATA_DB_PATH,
