@@ -5402,6 +5402,11 @@ def main():
     if menu == "수익률":
         st.header("수익 분석")
         st.caption("TOP3·TOP30·모의투자의 실제 청산 수익률을 비교합니다.")
+        st.subheader("결합전략 그림자 검증")
+        st.caption(
+            "TOP3·TOP30 결합전략을 실제 주문 없이 자동 추적하며, "
+            "매수·매도 판단과 워크포워드 백테스트 결과를 검증합니다."
+        )
         show_prediction_performance_summary(show_details=True)
         return
 
