@@ -47,9 +47,14 @@ from strategy_backtest import run_walk_forward_backtest
 # 다크 모드에서 캔버스형 dataframe을 HTML 표로 대체할 때 원본 함수를 보관한다.
 _NATIVE_DATAFRAME = st.dataframe
 
-LOCAL_DB_PATH = Path(__file__).resolve().with_name("stock_data.db")
 st.set_page_config(page_title="HONG STOCK | 이유를 기록하는 주식 분석", layout="wide")
-DB_PATH = get_shared_database_path(LOCAL_DB_PATH)
+try:
+    DB_PATH = get_shared_database_path()
+except RuntimeError as exc:
+    st.error("중앙 Supabase DB에 연결할 수 없습니다.")
+    st.caption(f"로컬 SQLite 대체 조회는 비활성화되어 있습니다. 관리자 확인: {exc}")
+    st.stop()
+    raise
 DB_NAME = str(DB_PATH)
 
 st.markdown(
@@ -374,15 +379,6 @@ def _load_table_cached(
 def load_table(table_name: str) -> pd.DataFrame:
     """30초 동안 같은 DB 읽기를 재사용하고, DB 변경 시 즉시 다시 읽는다."""
     return _load_table_cached(DB_NAME, table_name, _database_version())
-
-
-def load_local_table(table_name: str) -> pd.DataFrame:
-    """중앙 DB에 필요한 데이터가 없을 때만 번들 SQLite를 읽는다."""
-    try:
-        version = LOCAL_DB_PATH.stat().st_mtime_ns
-    except OSError:
-        version = 0
-    return _load_table_cached(str(LOCAL_DB_PATH), table_name, version)
 
 
 def show_theme_aware_table(dataframe: pd.DataFrame, *args, **kwargs) -> None:
@@ -778,7 +774,7 @@ def get_db_status() -> dict:
         "latest_dates": {},
         "duplicate_counts": {},
         "errors": [],
-        "source": "local",
+        "source": "unavailable",
         "source_error": None,
     }
 
@@ -792,7 +788,7 @@ def get_db_status() -> dict:
         os.path.getmtime(DB_NAME)
     )
     shared_info = get_shared_database_info()
-    result["source"] = str(shared_info.get("source") or "local")
+    result["source"] = str(shared_info.get("source") or "unavailable")
     result["source_error"] = shared_info.get("error")
     central_updated_at = pd.to_datetime(
         shared_info.get("updated_at"), errors="coerce", utc=True
@@ -1035,7 +1031,7 @@ def show_db_status():
     source_labels = {
         "supabase": "Supabase 중앙 DB",
         "supabase-cache": "Supabase 중앙 DB · 마지막 정상 캐시",
-        "local": "로컬 SQLite 대체본",
+        "unavailable": "중앙 DB 연결 불가",
     }
     source_text = source_labels.get(status["source"], status["source"])
     if status["source"] == "supabase":
@@ -3794,7 +3790,7 @@ def show_morning_briefing(history_df: pd.DataFrame, supply_df: pd.DataFrame):
     st.header("오늘 장 준비")
     today = pd.Timestamp.now().date()
     premarket_df = normalize_score_df(load_table("premarket_score"))
-    premarket_source = "Supabase 중앙 DB" if DB_PATH != LOCAL_DB_PATH else "로컬 SQLite"
+    premarket_source = "Supabase 중앙 DB"
     is_today_premarket = False
     premarket_date = None
     generated_at = ""
@@ -3817,12 +3813,6 @@ def show_morning_briefing(history_df: pd.DataFrame, supply_df: pd.DataFrame):
         return candidate[candidate["분석기준일"] == latest_date].copy(), latest_date
 
     briefing, premarket_date = select_latest_premarket(premarket_df)
-    if briefing.empty and DB_PATH != LOCAL_DB_PATH:
-        local_premarket_df = normalize_score_df(load_local_table("premarket_score"))
-        briefing, premarket_date = select_latest_premarket(local_premarket_df)
-        if not briefing.empty:
-            premarket_source = "로컬 SQLite"
-
     has_premarket = not briefing.empty
     if has_premarket:
         is_today_premarket = premarket_date == today
