@@ -2837,8 +2837,6 @@ def show_today_top(
         supply_df=supply_df,
         news_df=news_df,
     )
-    paper_buy_popup = make_top30_paper_buy_dialog()
-
     # 추천 사유와 상세 버튼을 제거하고 종목명 영역을 넓힘
     widths = [
         0.55,  # 순위
@@ -2997,7 +2995,12 @@ def show_today_top(
             key=f"top30_paper_buy_{selected_date}_{code}",
             use_container_width=True,
         ):
-            paper_buy_popup(name, code, fallback_price)
+            st.session_state["top30_paper_buy_request"] = {
+                "stock_name": name,
+                "stock_code": code,
+                "fallback_price": fallback_price,
+            }
+            st.rerun()
 
 def show_stock_search(
     score_df: pd.DataFrame,
@@ -5541,6 +5544,14 @@ def main():
             theme_history_df=theme_history_df,
             selected_date=selected_date,
         )
+        paper_buy_request = st.session_state.pop("top30_paper_buy_request", None)
+        if paper_buy_request:
+            paper_buy_popup = make_top30_paper_buy_dialog()
+            paper_buy_popup(
+                paper_buy_request["stock_name"],
+                paper_buy_request["stock_code"],
+                paper_buy_request["fallback_price"],
+            )
         return
 
     if menu == "장중 흐름":
