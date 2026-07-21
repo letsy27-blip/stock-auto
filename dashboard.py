@@ -2695,6 +2695,7 @@ def make_top30_paper_buy_dialog():
 
 
 
+@st.fragment(run_every=5)
 def show_today_top(
     score_df: pd.DataFrame,
     chart_df: pd.DataFrame,
@@ -2769,7 +2770,6 @@ def show_today_top(
         hub = get_realtime_quote_hub()
         hub.ensure_codes(top30_codes, source="dashboard_top30")
         top30_quotes = hub.snapshot(top30_codes).get("quotes", {})
-        st_autorefresh(interval=5000, key="top30_signal_refresh")
 
     detail_popup = make_stock_dialog(
         score_df=score_df,
@@ -3649,6 +3649,7 @@ def show_paper_order_live_price(stock_code: str, fallback_price: float = 0.0):
         st.metric("실시간 현재가", "연결 중")
 
 
+@st.fragment(run_every=1)
 def show_realtime_recommendations(
     current_df: pd.DataFrame,
     score_df: pd.DataFrame,
@@ -3725,8 +3726,6 @@ def show_realtime_recommendations(
             realtime_status = f"실시간 연결 재시도 중: {realtime['error']}"
         else:
             realtime_status = "KIS WebSocket 연결 중"
-        if not st.session_state.get("realtime_detail_dialog_open", False):
-            st_autorefresh(interval=1000, key="realtime_recommendation_refresh")
 
     # WebSocket은 체결가 중심이고 시가 정보가 없으므로, REST 현재가의 시가를
     # 함께 사용해 카드 차트의 빨강/파랑 기준을 정확히 표시한다.
