@@ -5254,6 +5254,24 @@ def load_latest_scores_cached():
     return load_latest_scores()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def load_dashboard_data_bundle(database_path: str, database_version: int):
+    """메뉴마다 반복하던 공통 테이블 정규화를 DB 버전별로 한 번만 수행한다."""
+    def read_table(table_name: str) -> pd.DataFrame:
+        return _load_table_cached(database_path, table_name, database_version)
+
+    return (
+        normalize_score_df(read_table("score")),
+        read_table("intraday_snapshot"),
+        read_table("chart_history"),
+        normalize_supply_df(read_table("supply_demand")),
+        normalize_news_df(read_table("news_history")),
+        normalize_master_df(read_table("stock_master")),
+        normalize_classification_df(read_table("stock_classification")),
+        normalize_theme_history_df(read_table("stock_theme_history")),
+    )
+
+
 def main():
     if not is_auth_configured():
         st.error("Supabase 로그인 설정이 없어 대시보드를 열 수 없습니다.")
@@ -5273,12 +5291,17 @@ def main():
     # 집·회사·배포 환경 모두 Supabase의 검증된 전체 DB 스냅샷만 사용한다.
     # 중앙 연결 장애 때는 오래된 로컬 데이터를 표시하지 않고 시작을 중단한다.
 
-    all_score_df = normalize_score_df(
-        load_table("score")
-    )
-
+    (
+        all_score_df,
+        snapshot_df,
+        chart_df,
+        supply_df,
+        news_df,
+        master_df,
+        classification_df,
+        theme_history_df,
+    ) = load_dashboard_data_bundle(DB_NAME, _database_version())
     history_df = all_score_df.copy()
-    snapshot_df = load_table("intraday_snapshot")
 
     # 현재 추천 화면은 같은 DB 안의 최신 장중 스냅샷을 단일 기준으로 삼는다.
     # score 테이블에는 재분석 시점별 묶음이 함께 쌓이므로 단순히 가장 늦게
@@ -5314,27 +5337,6 @@ def main():
         current_df = all_score_df[update_datetime == latest_update].copy()
 
     current_df = enrich_current_signals(current_df, all_score_df)
-
-    chart_df = load_table("chart_history")
-
-    supply_df = normalize_supply_df(
-        load_table("supply_demand")
-    )
-
-    news_df = normalize_news_df(
-        load_table("news_history")
-    )
-    master_df = normalize_master_df(
-        load_table("stock_master")
-    )
-
-    classification_df = normalize_classification_df(
-        load_table("stock_classification")
-    )
-
-    theme_history_df = normalize_theme_history_df(
-        load_table("stock_theme_history")
-    )
 
     database_info = get_shared_database_info()
     code_version = get_code_version()
