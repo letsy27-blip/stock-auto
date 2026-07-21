@@ -5,6 +5,10 @@ from typing import Any
 
 import requests
 import streamlit as st
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 
 def _setting(name: str, default: str = "") -> str:
