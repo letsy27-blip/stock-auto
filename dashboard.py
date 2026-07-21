@@ -24,7 +24,6 @@ from dashboard_data import (
     available_score_dates,
     normalize_kst_date,
     normalize_kst_date_series,
-    normalize_kst_datetime_series,
     score_rows_for_date,
     select_morning_briefing,
 )
@@ -1226,6 +1225,19 @@ def safe_float(value, default=0.0) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def normalize_ordered_at_kst(series: pd.Series) -> pd.Series:
+    """SQLite와 Supabase 주문시간을 모두 KST 시간대로 맞춘다."""
+    def normalize(value):
+        timestamp = pd.to_datetime(value, errors="coerce")
+        if pd.isna(timestamp):
+            return pd.NaT
+        if timestamp.tzinfo is None:
+            return timestamp.tz_localize("Asia/Seoul")
+        return timestamp.tz_convert("Asia/Seoul")
+
+    return series.map(normalize)
 
 
 def clean_code(code) -> str:
@@ -3300,7 +3312,7 @@ def show_prediction_performance_summary(show_details: bool = True):
     }
     if paper_orders is not None and not paper_orders.empty:
         orders = paper_orders.copy()
-        orders["ordered_at"] = normalize_kst_datetime_series(orders["ordered_at"])
+        orders["ordered_at"] = normalize_ordered_at_kst(orders["ordered_at"])
         sells = orders[
             (orders["side"].astype(str).str.upper() == "SELL")
             & (orders["ordered_at"] >= period_starts[period])
