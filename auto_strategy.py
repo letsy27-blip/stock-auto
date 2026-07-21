@@ -383,8 +383,12 @@ def reset_auto_strategies() -> None:
         )
 
 
-def get_strategy_performance(period: str = "일간") -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    initialize_auto_strategies()
+def get_strategy_performance(
+    period: str = "일간",
+    db_path: str | Path | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if db_path is None:
+        initialize_auto_strategies()
     now = datetime.now()
     starts = {
         "일간": now.replace(hour=0, minute=0, second=0, microsecond=0),
@@ -393,7 +397,8 @@ def get_strategy_performance(period: str = "일간") -> tuple[pd.DataFrame, pd.D
         "연간": now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0),
     }
     start = starts.get(period, starts["일간"]).isoformat(timespec="seconds")
-    with _connect() as connection:
+    connection_context = _connect() if db_path is None else sqlite3.connect(db_path)
+    with connection_context as connection:
         accounts = pd.read_sql_query("SELECT * FROM auto_strategy_accounts", connection)
         positions = pd.read_sql_query("SELECT * FROM auto_strategy_positions", connection)
         trades = pd.read_sql_query(
@@ -419,10 +424,13 @@ def get_strategy_performance(period: str = "일간") -> tuple[pd.DataFrame, pd.D
     return pd.DataFrame(summaries), positions, trades
 
 
-def get_top3_signal_status() -> pd.DataFrame:
+def get_top3_signal_status(db_path: str | Path | None = None) -> pd.DataFrame:
     """현재 TOP3의 자동매수 여부와 대기 이유를 사용자용 표로 반환한다."""
-    initialize_auto_strategies()
-    with _connect() as connection:
+    if db_path is None:
+        initialize_auto_strategies()
+    connection_context = _connect() if db_path is None else sqlite3.connect(db_path)
+    connection_context.row_factory = sqlite3.Row
+    with connection_context as connection:
         snapshot_time = connection.execute(
             'SELECT MAX("스냅샷일시") FROM intraday_snapshot'
         ).fetchone()[0]
