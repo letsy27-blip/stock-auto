@@ -59,7 +59,7 @@ try:
     DB_PATH = get_shared_database_path()
 except RuntimeError as exc:
     st.error("중앙 Supabase DB에 연결할 수 없습니다.")
-    st.caption(f"Supabase와 로컬 SQLite를 모두 조회할 수 없습니다. 관리자 확인: {exc}")
+    st.caption(f"로컬 SQLite 대체 조회는 비활성화되어 있습니다. 관리자 확인: {exc}")
     st.stop()
     raise
 DB_NAME = str(DB_PATH)
@@ -3773,28 +3773,9 @@ def show_realtime_recommendations(
 def show_morning_briefing(history_df: pd.DataFrame, supply_df: pd.DataFrame):
     st.header("오늘 장 준비")
     today = pd.Timestamp.now().date()
-    storage_info = get_shared_database_info()
-    central_premarket = (
-        normalize_score_df(load_table("premarket_score"))
-        if storage_info.get("source") == "supabase"
-        else pd.DataFrame()
-    )
-    local_database = Path(__file__).resolve().parent / "stock_data.db"
-    local_premarket = pd.DataFrame()
-    if local_database.is_file() and local_database.resolve() != DB_PATH.resolve():
-        local_premarket = normalize_score_df(
-            _load_table_cached(
-                str(local_database),
-                "premarket_score",
-                local_database.stat().st_mtime_ns,
-            )
-        )
-    elif storage_info.get("source") == "sqlite":
-        local_premarket = normalize_score_df(load_table("premarket_score"))
-
+    central_premarket = normalize_score_df(load_table("premarket_score"))
     selection = select_morning_briefing(
         central_premarket,
-        local_premarket,
         history_df,
         today,
     )
@@ -3825,7 +3806,7 @@ def show_morning_briefing(history_df: pd.DataFrame, supply_df: pd.DataFrame):
         ).dt.date.dropna()
         reference_date = market_dates.max() if not market_dates.empty else today
     else:
-        st.caption("Supabase와 SQLite에 장전 분석이 없어 전일 마감 분석을 대신 표시합니다. 아래 현재 매수 판단과 종목이 달라질 수 있습니다.")
+        st.caption("중앙 장전 분석이 없어 같은 Supabase 스냅샷의 전일 마감 분석을 대신 표시합니다. 아래 현재 매수 판단과 종목이 달라질 수 있습니다.")
         if briefing.empty or premarket_date is None:
             st.info("장전 또는 전일 마감 분석 데이터가 아직 없습니다.")
             return

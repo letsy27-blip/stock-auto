@@ -68,21 +68,18 @@ def _latest_rows_on_or_before(
 
 
 def select_morning_briefing(
-    supabase_premarket: pd.DataFrame,
-    sqlite_premarket: pd.DataFrame,
+    central_premarket: pd.DataFrame,
     score_history: pd.DataFrame,
     today: date,
 ) -> MorningBriefingSelection:
-    """Select Supabase, SQLite, then the previous close in that exact order."""
-    for frame, source in (
-        (supabase_premarket, "Supabase 중앙 DB"),
-        (sqlite_premarket, "로컬 SQLite"),
-    ):
-        selected, selected_date = _latest_rows_on_or_before(
-            frame, "분석기준일", today
+    """Select the central Supabase snapshot, then its previous-close history."""
+    selected, selected_date = _latest_rows_on_or_before(
+        central_premarket, "분석기준일", today
+    )
+    if not selected.empty:
+        return MorningBriefingSelection(
+            selected, "Supabase 중앙 DB", selected_date, True
         )
-        if not selected.empty:
-            return MorningBriefingSelection(selected, source, selected_date, True)
 
     if score_history is not None and not score_history.empty and "저장일자" in score_history.columns:
         history = score_history.copy()

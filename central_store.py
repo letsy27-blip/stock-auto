@@ -184,30 +184,6 @@ def _shared_cache_paths() -> tuple[Path, Path]:
     return cache_dir / "shared_stock_data.db", cache_dir / "shared_stock_data.json"
 
 
-def _bundled_database_path() -> Path:
-    return Path(__file__).resolve().parent / "stock_data.db"
-
-
-def _use_local_database(error: str) -> Path | None:
-    local_path = _bundled_database_path()
-    if not local_path.is_file():
-        return None
-    try:
-        _validate_sqlite(local_path)
-    except (OSError, ValueError, sqlite3.DatabaseError):
-        return None
-    global _DB_CACHE_INFO
-    _DB_CACHE_INFO = {
-        "source": "sqlite",
-        "updated_at": datetime.fromtimestamp(
-            local_path.stat().st_mtime, tz=timezone.utc
-        ).isoformat(),
-        "path": str(local_path),
-        "error": error,
-    }
-    return local_path
-
-
 def _read_cache_metadata(path: Path) -> dict:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -222,11 +198,6 @@ def get_shared_database_path(min_check_seconds: int = 30) -> Path:
     cache_path, metadata_path = _shared_cache_paths()
     url, key = _settings(write=False)
     if not url or not key:
-        local_path = _use_local_database(
-            "Supabase read credentials are not configured"
-        )
-        if local_path is not None:
-            return local_path
         if cache_path.is_file():
             try:
                 _validate_sqlite(cache_path)
@@ -336,9 +307,6 @@ def get_shared_database_path(min_check_seconds: int = 30) -> Path:
             }
             return cache_path
         except (OSError, ValueError, TypeError, requests.RequestException) as exc:
-            local_path = _use_local_database(str(exc))
-            if local_path is not None:
-                return local_path
             if cache_path.is_file():
                 try:
                     _validate_sqlite(cache_path)

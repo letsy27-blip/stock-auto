@@ -37,25 +37,18 @@ class DashboardDataTest(unittest.TestCase):
         self.assertEqual(available_score_dates(scores), [date(2026, 7, 20)])
         self.assertEqual(len(score_rows_for_date(scores, date(2026, 7, 20))), 3)
 
-    def test_morning_briefing_prefers_supabase(self):
+    def test_morning_briefing_uses_central_supabase_snapshot(self):
         supabase = pd.DataFrame({"분석기준일": ["2026-07-20"], "종목코드": ["1"]})
-        sqlite = pd.DataFrame({"분석기준일": ["2026-07-21"], "종목코드": ["2"]})
-        result = select_morning_briefing(supabase, sqlite, pd.DataFrame(), date(2026, 7, 21))
+        result = select_morning_briefing(supabase, pd.DataFrame(), date(2026, 7, 21))
         self.assertEqual(result.source, "Supabase 중앙 DB")
         self.assertEqual(result.data_date, date(2026, 7, 20))
-
-    def test_morning_briefing_falls_back_to_sqlite(self):
-        sqlite = pd.DataFrame({"분석기준일": ["2026-07-21"], "종목코드": ["2"]})
-        result = select_morning_briefing(pd.DataFrame(), sqlite, pd.DataFrame(), date(2026, 7, 21))
-        self.assertEqual(result.source, "로컬 SQLite")
-        self.assertEqual(result.data_date, date(2026, 7, 21))
 
     def test_morning_briefing_falls_back_to_previous_close(self):
         history = pd.DataFrame(
             {"저장일자": ["2026-07-20", "2026-07-21"], "종목코드": ["1", "2"]}
         )
         result = select_morning_briefing(
-            pd.DataFrame(), pd.DataFrame(), history, date(2026, 7, 21)
+            pd.DataFrame(), history, date(2026, 7, 21)
         )
         self.assertEqual(result.source, "전일 종가 대체 데이터")
         self.assertEqual(result.data_date, date(2026, 7, 20))
