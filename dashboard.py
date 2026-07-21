@@ -24,6 +24,7 @@ from dashboard_data import (
     available_score_dates,
     normalize_kst_date,
     normalize_kst_date_series,
+    normalize_kst_datetime_series,
     score_rows_for_date,
     select_morning_briefing,
 )
@@ -3277,7 +3278,7 @@ def show_prediction_performance_summary(show_details: bool = True):
         period = "일간"
     summary, positions, trades = get_strategy_performance(period, db_path=DB_PATH)
 
-    now = pd.Timestamp.now()
+    now = pd.Timestamp.now(tz="Asia/Seoul")
     period_starts = {
         "일간": now.normalize(),
         "주간": (now - pd.Timedelta(days=now.weekday())).normalize(),
@@ -3299,7 +3300,7 @@ def show_prediction_performance_summary(show_details: bool = True):
     }
     if paper_orders is not None and not paper_orders.empty:
         orders = paper_orders.copy()
-        orders["ordered_at"] = pd.to_datetime(orders["ordered_at"], errors="coerce")
+        orders["ordered_at"] = normalize_kst_datetime_series(orders["ordered_at"])
         sells = orders[
             (orders["side"].astype(str).str.upper() == "SELL")
             & (orders["ordered_at"] >= period_starts[period])

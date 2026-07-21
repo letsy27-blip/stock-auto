@@ -24,6 +24,20 @@ def normalize_kst_date_series(series: pd.Series) -> pd.Series:
     return series.map(normalize_kst_date)
 
 
+def normalize_kst_datetime(value) -> pd.Timestamp | pd.NaT:
+    """Normalize naive SQLite and timezone-aware Supabase timestamps to KST."""
+    timestamp = pd.to_datetime(value, errors="coerce")
+    if pd.isna(timestamp):
+        return pd.NaT
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("Asia/Seoul")
+    return timestamp.tz_convert("Asia/Seoul")
+
+
+def normalize_kst_datetime_series(series: pd.Series) -> pd.Series:
+    return series.map(normalize_kst_datetime)
+
+
 def available_score_dates(score_df: pd.DataFrame) -> list[date]:
     if score_df is None or score_df.empty or "저장일자" not in score_df.columns:
         return []

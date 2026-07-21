@@ -7,6 +7,7 @@ import pandas as pd
 
 from dashboard_data import (
     available_score_dates,
+    normalize_kst_datetime_series,
     score_rows_for_date,
     select_morning_briefing,
 )
@@ -36,6 +37,14 @@ class DashboardDataTest(unittest.TestCase):
         )
         self.assertEqual(available_score_dates(scores), [date(2026, 7, 20)])
         self.assertEqual(len(score_rows_for_date(scores, date(2026, 7, 20))), 3)
+
+    def test_order_times_are_comparable_in_kst(self):
+        ordered_at = normalize_kst_datetime_series(
+            pd.Series(["2026-07-21T23:30:00Z", "2026-07-22 08:35:00"])
+        )
+        period_start = pd.Timestamp("2026-07-22", tz="Asia/Seoul")
+
+        self.assertEqual((ordered_at >= period_start).tolist(), [True, True])
 
     def test_morning_briefing_uses_central_supabase_snapshot(self):
         supabase = pd.DataFrame({"분석기준일": ["2026-07-20"], "종목코드": ["1"]})
