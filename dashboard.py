@@ -3435,7 +3435,15 @@ def show_prediction_performance_summary(show_details: bool = True):
     if show_details:
         with st.expander("결합전략 그림자 검증 · TOP30 매수·매도 판단 상세"):
             if top30_positions.empty:
-                st.info("아직 TOP30 가상매수 종목이 없습니다. 2026-07-20 장 시작 후 자동 기록됩니다.")
+                latest_decision_at = (
+                    str(top3_status["스냅샷"].iloc[0])
+                    if top3_status is not None and not top3_status.empty
+                    else "중앙 DB 최신 분석 대기"
+                )
+                st.info(
+                    "현재 보유 중인 TOP30 가상매수 종목은 0개입니다. "
+                    f"최신 자동 판단: {latest_decision_at} · 전략 기록 시작일: 2026-07-20"
+                )
             else:
                 position_view = top30_positions[
                     ["strategy", "stock_name", "quantity", "entry_price", "target_price",
