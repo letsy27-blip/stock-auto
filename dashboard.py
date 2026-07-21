@@ -5179,8 +5179,8 @@ def main():
     )
     st.caption(market_regime_quote(header_regime["regime"]))
 
-    # 집·회사·배포 환경 모두 Supabase의 검증된 전체 DB 스냅샷을 우선 사용한다.
-    # 중앙 연결 장애 때만 마지막 정상 캐시 또는 번들된 로컬 DB로 대체한다.
+    # 집·회사·배포 환경 모두 Supabase의 검증된 전체 DB 스냅샷만 사용한다.
+    # 중앙 연결 장애 때는 오래된 로컬 데이터를 표시하지 않고 시작을 중단한다.
 
     all_score_df = normalize_score_df(
         load_table("score")
@@ -5243,6 +5243,32 @@ def main():
 
     theme_history_df = normalize_theme_history_df(
         load_table("stock_theme_history")
+    )
+
+    database_info = get_shared_database_info()
+    code_version = (
+        os.getenv("STREAMLIT_GIT_COMMIT")
+        or os.getenv("GITHUB_SHA")
+        or os.getenv("RENDER_GIT_COMMIT")
+        or "확인 불가"
+    )
+    central_updated_at = pd.to_datetime(
+        database_info.get("updated_at"), errors="coerce", utc=True
+    )
+    central_updated_text = (
+        central_updated_at.tz_convert("Asia/Seoul").strftime("%Y-%m-%d %H:%M:%S KST")
+        if pd.notna(central_updated_at) else "확인 불가"
+    )
+    latest_analysis_date = (
+        max(all_score_df["저장일자"].dropna())
+        if not all_score_df.empty
+        and "저장일자" in all_score_df.columns
+        and not all_score_df["저장일자"].dropna().empty
+        else "데이터 없음"
+    )
+    st.caption(
+        f"코드 {code_version[:12]} · 데이터 원본 Supabase 중앙 DB · "
+        f"중앙 DB 갱신 {central_updated_text} · 최신 분석일 {latest_analysis_date}"
     )
 
     if "active_dashboard_page" not in st.session_state:
@@ -5350,7 +5376,7 @@ def main():
     menu = st.session_state["active_dashboard_page"]
 
     if menu == "수익률":
-        st.header("수익률")
+        st.header("수익 분석")
         st.caption("TOP3·TOP30·모의투자의 실제 청산 수익률을 비교합니다.")
         show_prediction_performance_summary(show_details=True)
         return

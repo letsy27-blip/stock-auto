@@ -192,25 +192,12 @@ def _read_cache_metadata(path: Path) -> dict:
 
 
 def get_shared_database_path(min_check_seconds: int = 30) -> Path:
-    """Return only a validated central snapshot or its last known-good cache."""
+    """Return a validated central snapshot; never fall back after a central failure."""
     global _DB_CACHE_LAST_CHECK, _DB_CACHE_INFO
 
     cache_path, metadata_path = _shared_cache_paths()
     url, key = _settings(write=False)
     if not url or not key:
-        if cache_path.is_file():
-            try:
-                _validate_sqlite(cache_path)
-                cached_metadata = _read_cache_metadata(metadata_path)
-                _DB_CACHE_INFO = {
-                    "source": "supabase-cache",
-                    "updated_at": cached_metadata.get("updated_at"),
-                    "path": str(cache_path),
-                    "error": "Supabase read credentials are not configured",
-                }
-                return cache_path
-            except (OSError, ValueError, sqlite3.DatabaseError):
-                pass
         _DB_CACHE_INFO = {
             "source": "unavailable",
             "updated_at": None,
@@ -307,19 +294,6 @@ def get_shared_database_path(min_check_seconds: int = 30) -> Path:
             }
             return cache_path
         except (OSError, ValueError, TypeError, requests.RequestException) as exc:
-            if cache_path.is_file():
-                try:
-                    _validate_sqlite(cache_path)
-                    cached_metadata = _read_cache_metadata(metadata_path)
-                    _DB_CACHE_INFO = {
-                        "source": "supabase-cache",
-                        "updated_at": cached_metadata.get("updated_at"),
-                        "path": str(cache_path),
-                        "error": str(exc),
-                    }
-                    return cache_path
-                except (OSError, ValueError, sqlite3.DatabaseError):
-                    pass
             _DB_CACHE_INFO = {
                 "source": "unavailable",
                 "updated_at": None,
@@ -327,7 +301,7 @@ def get_shared_database_path(min_check_seconds: int = 30) -> Path:
                 "error": str(exc),
             }
             raise RuntimeError(
-                "Supabase central database is unavailable and no valid central cache exists"
+                "Supabase central database is unavailable; stale local data is not shown"
             ) from exc
 
 
