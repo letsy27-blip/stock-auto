@@ -633,7 +633,10 @@ def apply_display_theme(theme: str) -> None:
         }
         [data-testid="stAppViewContainer"] input,
         [data-testid="stAppViewContainer"] textarea,
-        [data-testid="stAppViewContainer"] [data-baseweb="select"] > div {
+        [data-testid="stAppViewContainer"] [data-baseweb="select"] > div,
+        [data-testid="stAppViewContainer"] [data-testid="stTextInputRootElement"],
+        [data-testid="stAppViewContainer"] [data-testid="stTextInputRootElement"] > input,
+        [data-testid="stAppViewContainer"] [data-testid="stTextInputRootElement"] > button {
             background: #171B21 !important;
             color: #E5E7EB !important;
             border-color: #4B5563 !important;
