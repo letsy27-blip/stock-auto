@@ -32,10 +32,8 @@ def _price_from_response(body: dict) -> float:
 
 def run_once() -> dict[str, int]:
     initialize_auto_strategies()
-    try:
-        restore_strategy_state(DB_PATH)
-    except Exception as exc:
-        print(f"중앙 상태 복원 실패 · GitHub DB 사용: {exc}")
+    if not restore_strategy_state(DB_PATH):
+        raise RuntimeError("Supabase 중앙 매매 상태를 복원할 수 없습니다.")
 
     codes = get_open_position_codes()
     if not codes:

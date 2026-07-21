@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import base64
+import gzip
+import hashlib
 import json
 import os
+import shutil
 import sqlite3
+import tempfile
+import threading
+import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -15,20 +23,35 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+SHARED_DATABASE_KEY = "shared_database"
+_DB_CACHE_LOCK = threading.Lock()
+_DB_CACHE_LAST_CHECK = 0.0
+_DB_CACHE_INFO: dict[str, object] = {
+    "source": "unavailable",
+    "updated_at": None,
+    "path": None,
+    "error": None,
+}
+
+
 def _settings(write: bool = False) -> tuple[str, str]:
     url = os.getenv("SUPABASE_URL", "").rstrip("/")
     key_name = "SUPABASE_SERVICE_ROLE_KEY" if write else "SUPABASE_ANON_KEY"
     key = os.getenv(key_name, "")
     if not key and not write:
         key = os.getenv("SUPABASE_PUBLISHABLE_KEY", "")
+        key = key or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
     if not url or not key:
         try:
             import streamlit as st
 
             url = url or str(st.secrets.get("SUPABASE_URL", "")).rstrip("/")
-            key = key or str(st.secrets.get(key_name, ""))
-            if not key and not write:
-                key = str(st.secrets.get("SUPABASE_PUBLISHABLE_KEY", ""))
+            if write:
+                key = key or str(st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", ""))
+            else:
+                key = key or str(st.secrets.get("SUPABASE_ANON_KEY", ""))
+                key = key or str(st.secrets.get("SUPABASE_PUBLISHABLE_KEY", ""))
+                key = key or str(st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", ""))
         except Exception:
             pass
     return url, key
@@ -83,11 +106,11 @@ def publish_latest_scores(scored_df: pd.DataFrame, source: str = "collector") ->
     return snapshot_at
 
 
-def load_latest_scores() -> tuple[pd.DataFrame, pd.Timestamp | None, str | None]:
-    """Read the shared current ranking and keep connection failures explicit."""
+def load_latest_scores() -> tuple[pd.DataFrame, pd.Timestamp | None]:
+    """Read the shared current ranking. Returns an empty frame when unavailable."""
     url, key = _settings(write=False)
     if not url or not key:
-        return pd.DataFrame(), None, "Supabase read credentials are not configured"
+        return pd.DataFrame(), None
     try:
         response = requests.get(
             f"{url}/rest/v1/hongstock_state",
@@ -98,96 +121,216 @@ def load_latest_scores() -> tuple[pd.DataFrame, pd.Timestamp | None, str | None]
         response.raise_for_status()
         rows = response.json()
         if not rows:
-            return pd.DataFrame(), None, "Supabase latest_scores row is missing"
+            return pd.DataFrame(), None
         value = rows[0].get("value") or {}
         frame = pd.DataFrame(value.get("scores") or [])
         timestamp = pd.to_datetime(value.get("snapshot_at"), errors="coerce", utc=True)
         if pd.isna(timestamp):
             timestamp = None
-        return frame, timestamp, None
-    except (requests.RequestException, ValueError, TypeError) as exc:
-        return pd.DataFrame(), None, f"Supabase latest_scores read failed: {exc}"
+        return frame, timestamp
+    except (requests.RequestException, ValueError, TypeError):
+        return pd.DataFrame(), None
 
 
-DASHBOARD_TABLES = (
-    "score",
-    "score_current",
-    "intraday_snapshot",
-    "market_event_history",
-    "chart_history",
-    "supply_demand",
-    "news_history",
-    "stock_master",
-    "stock_classification",
-    "stock_theme_history",
-    "auto_strategy_accounts",
-    "auto_strategy_positions",
-    "auto_strategy_trades",
-)
+def _validate_sqlite(path: Path) -> None:
+    connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    try:
+        result = connection.execute("PRAGMA quick_check").fetchone()
+    finally:
+        connection.close()
+    if not result or result[0] != "ok":
+        raise ValueError("Downloaded shared database failed SQLite integrity check")
 
 
-def publish_dashboard_state(
+def publish_database_snapshot(
     db_path: str | os.PathLike,
-    current_scores: pd.DataFrame,
     source: str = "collector",
 ) -> str:
-    """Publish one authoritative dashboard bundle without changing DB schema."""
+    """Publish one compressed, authoritative SQLite snapshot for every dashboard."""
     url, key = _settings(write=True)
     if not url or not key:
         raise RuntimeError("Supabase central write credentials are not configured")
-    with sqlite3.connect(db_path) as connection:
-        tables = {
-            table: _records(pd.read_sql_query(f'SELECT * FROM "{table}"', connection))
-            for table in DASHBOARD_TABLES
-        }
+
+    path = Path(db_path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    _validate_sqlite(path)
+
+    raw = path.read_bytes()
+    compressed = gzip.compress(raw, compresslevel=6)
     snapshot_at = datetime.now(timezone.utc).isoformat()
+    value = {
+        "snapshot_at": snapshot_at,
+        "source": source,
+        "encoding": "gzip+base64",
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+        "payload": base64.b64encode(compressed).decode("ascii"),
+    }
     response = requests.post(
         f"{url}/rest/v1/hongstock_state?on_conflict=key",
         headers=_headers(key, "resolution=merge-duplicates,return=minimal"),
-        json={
-            "key": "dashboard_state",
-            "value": {
-                "snapshot_at": snapshot_at,
-                "source": source,
-                "current_scores": _records(current_scores),
-                "tables": tables,
-            },
-            "updated_at": snapshot_at,
-        },
-        timeout=90,
+        json={"key": SHARED_DATABASE_KEY, "value": value, "updated_at": snapshot_at},
+        timeout=60,
     )
     response.raise_for_status()
     return snapshot_at
 
 
-def load_dashboard_state() -> tuple[dict[str, pd.DataFrame], pd.DataFrame, pd.Timestamp | None, str | None]:
-    """Load the central screen bundle; never substitute local SQLite on failure."""
+def _shared_cache_paths() -> tuple[Path, Path]:
+    configured = os.getenv("HONGSTOCK_CACHE_DIR", "").strip()
+    cache_dir = Path(configured) if configured else Path(tempfile.gettempdir()) / "hongstock"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / "shared_stock_data.db", cache_dir / "shared_stock_data.json"
+
+
+def _read_cache_metadata(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def get_shared_database_path(min_check_seconds: int = 30) -> Path:
+    """Return a validated central snapshot; never fall back after a central failure."""
+    global _DB_CACHE_LAST_CHECK, _DB_CACHE_INFO
+
+    cache_path, metadata_path = _shared_cache_paths()
     url, key = _settings(write=False)
     if not url or not key:
-        return {}, pd.DataFrame(), None, "Supabase read credentials are not configured"
-    try:
-        response = requests.get(
-            f"{url}/rest/v1/hongstock_state",
-            headers=_headers(key),
-            params={"key": "eq.dashboard_state", "select": "value", "limit": "1"},
-            timeout=30,
-        )
-        response.raise_for_status()
-        rows = response.json()
-        if not rows:
-            return {}, pd.DataFrame(), None, "Supabase dashboard_state row is missing"
-        value = rows[0].get("value") or {}
-        tables = {
-            name: pd.DataFrame(records or [])
-            for name, records in (value.get("tables") or {}).items()
+        _DB_CACHE_INFO = {
+            "source": "unavailable",
+            "updated_at": None,
+            "path": None,
+            "error": "Supabase read credentials are not configured",
         }
-        current_scores = pd.DataFrame(value.get("current_scores") or [])
-        timestamp = pd.to_datetime(value.get("snapshot_at"), errors="coerce", utc=True)
-        if pd.isna(timestamp):
-            timestamp = None
-        return tables, current_scores, timestamp, None
-    except (requests.RequestException, ValueError, TypeError) as exc:
-        return {}, pd.DataFrame(), None, f"Supabase dashboard_state read failed: {exc}"
+        raise RuntimeError(
+            "Supabase read credentials are required; local SQLite fallback is disabled"
+        )
+
+    with _DB_CACHE_LOCK:
+        now = time.monotonic()
+        if (
+            cache_path.is_file()
+            and now - _DB_CACHE_LAST_CHECK < max(1, int(min_check_seconds))
+        ):
+            return cache_path
+        _DB_CACHE_LAST_CHECK = now
+
+        try:
+            metadata_response = requests.get(
+                f"{url}/rest/v1/hongstock_state",
+                headers=_headers(key),
+                params={
+                    "key": f"eq.{SHARED_DATABASE_KEY}",
+                    "select": "updated_at",
+                    "limit": "1",
+                },
+                timeout=12,
+            )
+            metadata_response.raise_for_status()
+            metadata_rows = metadata_response.json()
+            if not metadata_rows:
+                raise ValueError("No shared database snapshot exists in Supabase")
+
+            remote_updated_at = metadata_rows[0].get("updated_at")
+            cached_metadata = _read_cache_metadata(metadata_path)
+            if (
+                cache_path.is_file()
+                and cached_metadata.get("updated_at") == remote_updated_at
+            ):
+                _validate_sqlite(cache_path)
+                _DB_CACHE_INFO = {
+                    "source": "supabase",
+                    "updated_at": remote_updated_at,
+                    "path": str(cache_path),
+                    "error": None,
+                }
+                return cache_path
+
+            payload_response = requests.get(
+                f"{url}/rest/v1/hongstock_state",
+                headers=_headers(key),
+                params={
+                    "key": f"eq.{SHARED_DATABASE_KEY}",
+                    "select": "value",
+                    "limit": "1",
+                },
+                timeout=60,
+            )
+            payload_response.raise_for_status()
+            payload_rows = payload_response.json()
+            if not payload_rows:
+                raise ValueError("Shared database payload is empty")
+            value = payload_rows[0].get("value") or {}
+            if value.get("encoding") != "gzip+base64":
+                raise ValueError("Unsupported shared database encoding")
+
+            raw = gzip.decompress(base64.b64decode(value.get("payload") or ""))
+            expected_hash = str(value.get("sha256") or "")
+            if not expected_hash or hashlib.sha256(raw).hexdigest() != expected_hash:
+                raise ValueError("Shared database checksum mismatch")
+
+            temporary_path = cache_path.with_suffix(".tmp")
+            temporary_path.write_bytes(raw)
+            _validate_sqlite(temporary_path)
+            os.replace(temporary_path, cache_path)
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "updated_at": remote_updated_at,
+                        "snapshot_at": value.get("snapshot_at"),
+                        "sha256": expected_hash,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            _DB_CACHE_INFO = {
+                "source": "supabase",
+                "updated_at": remote_updated_at or value.get("snapshot_at"),
+                "path": str(cache_path),
+                "error": None,
+            }
+            return cache_path
+        except (OSError, ValueError, TypeError, requests.RequestException) as exc:
+            _DB_CACHE_INFO = {
+                "source": "unavailable",
+                "updated_at": None,
+                "path": None,
+                "error": str(exc),
+            }
+            raise RuntimeError(
+                "Supabase central database is unavailable; stale local data is not shown"
+            ) from exc
+
+
+def restore_database_snapshot(target_path: str | os.PathLike) -> Path:
+    """Restore the authoritative Supabase snapshot into a worker database."""
+    source_path = get_shared_database_path(min_check_seconds=0)
+    target = Path(target_path).resolve()
+    if source_path.resolve() == target:
+        return target
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".central.tmp")
+    shutil.copy2(source_path, temporary)
+    try:
+        _validate_sqlite(temporary)
+        try:
+            os.replace(temporary, target)
+        except PermissionError:
+            # Windows can reject replacing an existing SQLite file even after
+            # its handles are closed. This only overwrites the worker copy.
+            shutil.copy2(temporary, target)
+        _validate_sqlite(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
+
+
+def get_shared_database_info() -> dict[str, object]:
+    return dict(_DB_CACHE_INFO)
 
 
 STRATEGY_TABLES = (

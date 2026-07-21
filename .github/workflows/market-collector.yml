@@ -8,7 +8,7 @@ on:
     - cron: "0,30 0-6 * * 1-5"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: hongstock-market-automation
@@ -48,24 +48,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Restore authoritative Supabase database
+        run: |
+          python - <<'PY'
+          from central_store import restore_database_snapshot
+          print(f"Restored central database: {restore_database_snapshot('stock_data.db')}")
+          PY
+
       - name: Collect market data once
         run: python main.py --once
-
-      - name: Verify dashboard database was updated
-        run: |
-          if git diff --quiet -- stock_data.db; then
-            echo "Collection finished without updating stock_data.db. Check the Collect market data once log."
-            exit 1
-          fi
-
-      - name: Commit updated data
-        run: |
-          if git diff --quiet -- stock_data.db; then
-            echo "No database changes to commit."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add stock_data.db
-          git commit -m "chore: update market data"
-          git push

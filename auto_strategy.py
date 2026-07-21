@@ -385,8 +385,10 @@ def reset_auto_strategies() -> None:
 
 def get_strategy_performance(
     period: str = "일간",
-    central_tables: dict[str, pd.DataFrame] | None = None,
+    db_path: str | Path | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if db_path is None:
+        initialize_auto_strategies()
     now = datetime.now()
     starts = {
         "일간": now.replace(hour=0, minute=0, second=0, microsecond=0),
@@ -395,20 +397,14 @@ def get_strategy_performance(
         "연간": now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0),
     }
     start = starts.get(period, starts["일간"]).isoformat(timespec="seconds")
-    if central_tables is not None:
-        positions = central_tables.get("auto_strategy_positions", pd.DataFrame()).copy()
-        trades = central_tables.get("auto_strategy_trades", pd.DataFrame()).copy()
-        if not trades.empty and "closed_at" in trades.columns:
-            closed_at = pd.to_datetime(trades["closed_at"], errors="coerce")
-            trades = trades[closed_at >= pd.Timestamp(start)].sort_values("closed_at", ascending=False)
-    else:
-        initialize_auto_strategies()
-        with _connect() as connection:
-            positions = pd.read_sql_query("SELECT * FROM auto_strategy_positions", connection)
-            trades = pd.read_sql_query(
-                "SELECT * FROM auto_strategy_trades WHERE closed_at >= ? ORDER BY closed_at DESC",
-                connection, params=(start,),
-            )
+    connection_context = _connect() if db_path is None else sqlite3.connect(db_path)
+    with connection_context as connection:
+        accounts = pd.read_sql_query("SELECT * FROM auto_strategy_accounts", connection)
+        positions = pd.read_sql_query("SELECT * FROM auto_strategy_positions", connection)
+        trades = pd.read_sql_query(
+            "SELECT * FROM auto_strategy_trades WHERE closed_at >= ? ORDER BY closed_at DESC",
+            connection, params=(start,),
+        )
     summaries = []
     for strategy in STRATEGIES:
         subset = trades[trades["strategy"] == strategy] if not trades.empty else trades
@@ -428,10 +424,13 @@ def get_strategy_performance(
     return pd.DataFrame(summaries), positions, trades
 
 
-def get_top3_signal_status() -> pd.DataFrame:
+def get_top3_signal_status(db_path: str | Path | None = None) -> pd.DataFrame:
     """현재 TOP3의 자동매수 여부와 대기 이유를 사용자용 표로 반환한다."""
-    initialize_auto_strategies()
-    with _connect() as connection:
+    if db_path is None:
+        initialize_auto_strategies()
+    connection_context = _connect() if db_path is None else sqlite3.connect(db_path)
+    connection_context.row_factory = sqlite3.Row
+    with connection_context as connection:
         snapshot_time = connection.execute(
             'SELECT MAX("스냅샷일시") FROM intraday_snapshot'
         ).fetchone()[0]

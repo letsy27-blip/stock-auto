@@ -7,12 +7,12 @@ import pandas as pd
 
 from auto_strategy import DB_PATH as STRATEGY_DB_PATH, initialize_auto_strategies, update_auto_strategies
 from central_store import (
-    publish_dashboard_state,
+    publish_database_snapshot,
     publish_latest_scores,
     publish_strategy_state,
     restore_strategy_state,
 )
-from database import save_all_data
+from database import DB_PATH as DATA_DB_PATH, save_all_data, save_dataframe
 from excel_writer import save_to_excel
 from financial_analyzer import collect_financial_metrics
 from kis_api import (
@@ -203,13 +203,14 @@ def make_chart_history_data(token, candidate_df, days=60):
     return pd.concat(all_chart_data, ignore_index=True)
 
 
-def run_once():
-    initialize_auto_strategies()
-    try:
-        restored = restore_strategy_state(STRATEGY_DB_PATH)
-        print("중앙 자동매매 상태 복원 완료" if restored else "중앙 자동매매 최초 실행 · 로컬 초기 상태 사용")
-    except Exception as exc:
-        print(f"중앙 자동매매 상태 복원 실패 · GitHub DB 상태 사용: {exc}")
+def run_once(premarket: bool = False):
+    if not premarket:
+        initialize_auto_strategies()
+        try:
+            restored = restore_strategy_state(STRATEGY_DB_PATH)
+            print("중앙 자동매매 상태 복원 완료" if restored else "중앙 자동매매 최초 실행 · 로컬 초기 상태 사용")
+        except Exception as exc:
+            print(f"중앙 자동매매 상태 복원 실패 · GitHub DB 상태 사용: {exc}")
 
     token = get_access_token()
     if not token:
@@ -318,12 +319,51 @@ def run_once():
         rise_rank_df=rise_rank_df,
         trade_value_df=trade_value_df,
         signal_df=signal_df,
-        scored_df=scored_df,
+        scored_df=None if premarket else scored_df,
         chart_history_df=chart_history_df,
         supply_demand_df=supply_demand_df,
         news_history_df=news_history_df,
         financial_df=financial_df,
     )
+
+    if premarket:
+        analysis_time = datetime.now()
+        premarket_df = scored_df.copy()
+        premarket_df["저장일자"] = analysis_time.strftime("%Y-%m-%d")
+        premarket_df["저장시간"] = analysis_time.strftime("%H:%M:%S")
+        premarket_df["분석구분"] = "장전"
+        premarket_df["분석기준일"] = analysis_time.strftime("%Y-%m-%d")
+        premarket_df["분석생성일시"] = analysis_time.strftime("%Y-%m-%d %H:%M:%S")
+        saved_count = save_dataframe(
+            "premarket_score",
+            premarket_df,
+            data_type="premarket_score",
+        )
+        if saved_count <= 0:
+            raise RuntimeError("장전 추천 결과가 비어 있어 저장하지 못했습니다.")
+        print(f"장전 추천 저장 완료: {saved_count}개 종목 · {analysis_time:%Y-%m-%d %H:%M:%S}")
+        try:
+            central_time = publish_latest_scores(
+                premarket_df,
+                source=(
+                    "github-actions-premarket"
+                    if os.getenv("GITHUB_ACTIONS")
+                    else "local-premarket"
+                ),
+            )
+            print(f"중앙 최신 추천 갱신 완료: {central_time}")
+        except Exception as exc:
+            print(f"중앙 최신 추천 갱신 건너뜀: {exc}")
+        try:
+            snapshot_time = publish_database_snapshot(
+                DATA_DB_PATH,
+                source="github-actions-premarket" if os.getenv("GITHUB_ACTIONS") else "local-premarket",
+            )
+            print(f"중앙 전체 DB 스냅샷 갱신 완료: {snapshot_time}")
+        except Exception as exc:
+            print(f"중앙 전체 DB 스냅샷 갱신 건너뜀: {exc}")
+        print("장전 분석 모드이므로 자동매매 전략과 장중 예측 상태는 갱신하지 않습니다.")
+        return
 
     market_regime = classify_market_regime(get_market_overview(token))
     print(
@@ -355,14 +395,13 @@ def run_once():
         # 수집 데이터는 로컬에도 먼저 저장되어 있으므로 중앙 장애가 수집 자체를 망치지 않게 한다.
         print(f"중앙 DB 갱신 건너뜀: {exc}")
     try:
-        dashboard_time = publish_dashboard_state(
-            STRATEGY_DB_PATH,
-            scored_df,
+        snapshot_time = publish_database_snapshot(
+            DATA_DB_PATH,
             source="github-actions" if os.getenv("GITHUB_ACTIONS") else "local-collector",
         )
-        print(f"중앙 화면 데이터 갱신 완료: {dashboard_time}")
+        print(f"중앙 전체 DB 스냅샷 갱신 완료: {snapshot_time}")
     except Exception as exc:
-        print(f"중앙 화면 데이터 갱신 실패: {exc}")
+        print(f"중앙 전체 DB 스냅샷 갱신 건너뜀: {exc}")
     print(
         "자동전략 갱신: "
         f"가상 매수 {strategy_result['opened']}건, 가상 청산 {strategy_result['closed']}건"
@@ -428,7 +467,7 @@ def next_run_time(now: datetime) -> datetime | None:
     return None
 
 
-def run_once_safely() -> bool:
+def run_once_safely(premarket: bool = False) -> bool:
     started = datetime.now()
 
     print("")
@@ -437,7 +476,7 @@ def run_once_safely() -> bool:
     print("=" * 70)
 
     try:
-        run_once()
+        run_once(premarket=premarket)
         print(f"데이터 수집 완료: {datetime.now():%Y-%m-%d %H:%M:%S}")
         return True
     except Exception as exc:
@@ -508,13 +547,21 @@ def parse_args():
         action="store_true",
         help="즉시 한 번 실행 후 장중 30분마다 자동 실행",
     )
+    parser.add_argument(
+        "--premarket",
+        action="store_true",
+        help="장전 분석을 한 번 실행해 오늘 오전 추천으로 별도 저장",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
 
-    if args.once:
+    if args.premarket:
+        if not run_once_safely(premarket=True):
+            raise SystemExit(1)
+    elif args.once:
         if not run_once_safely():
             raise SystemExit(1)
     else:
