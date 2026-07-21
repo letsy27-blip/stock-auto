@@ -364,6 +364,36 @@ def _database_version() -> int:
         return 0
 
 
+def get_code_version() -> str:
+    """배포 환경 변수 또는 Git HEAD에서 현재 코드 커밋을 확인한다."""
+    configured = (
+        os.getenv("STREAMLIT_GIT_COMMIT")
+        or os.getenv("GITHUB_SHA")
+        or os.getenv("RENDER_GIT_COMMIT")
+    )
+    if configured:
+        return configured[:12]
+
+    git_dir = Path(__file__).resolve().parent / ".git"
+    try:
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref: "):
+            return head[:12]
+        ref_name = head.removeprefix("ref: ").strip()
+        loose_ref = git_dir / ref_name
+        if loose_ref.is_file():
+            return loose_ref.read_text(encoding="utf-8").strip()[:12]
+        packed_refs = (git_dir / "packed-refs").read_text(encoding="utf-8")
+        for line in packed_refs.splitlines():
+            if line and not line.startswith(("#", "^")):
+                commit, name = line.split(" ", 1)
+                if name == ref_name:
+                    return commit[:12]
+    except (OSError, ValueError):
+        pass
+    return "확인 불가"
+
+
 @st.cache_data(ttl=30, show_spinner=False)
 def _load_table_cached(
     database_path: str,
@@ -5246,12 +5276,7 @@ def main():
     )
 
     database_info = get_shared_database_info()
-    code_version = (
-        os.getenv("STREAMLIT_GIT_COMMIT")
-        or os.getenv("GITHUB_SHA")
-        or os.getenv("RENDER_GIT_COMMIT")
-        or "확인 불가"
-    )
+    code_version = get_code_version()
     central_updated_at = pd.to_datetime(
         database_info.get("updated_at"), errors="coerce", utc=True
     )
@@ -5267,7 +5292,7 @@ def main():
         else "데이터 없음"
     )
     st.caption(
-        f"코드 {code_version[:12]} · 데이터 원본 Supabase 중앙 DB · "
+        f"코드 {code_version} · 데이터 원본 Supabase 중앙 DB · "
         f"중앙 DB 갱신 {central_updated_text} · 최신 분석일 {latest_analysis_date}"
     )
 
