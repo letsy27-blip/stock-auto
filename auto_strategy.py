@@ -383,8 +383,10 @@ def reset_auto_strategies() -> None:
         )
 
 
-def get_strategy_performance(period: str = "일간") -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    initialize_auto_strategies()
+def get_strategy_performance(
+    period: str = "일간",
+    central_tables: dict[str, pd.DataFrame] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     now = datetime.now()
     starts = {
         "일간": now.replace(hour=0, minute=0, second=0, microsecond=0),
@@ -393,13 +395,20 @@ def get_strategy_performance(period: str = "일간") -> tuple[pd.DataFrame, pd.D
         "연간": now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0),
     }
     start = starts.get(period, starts["일간"]).isoformat(timespec="seconds")
-    with _connect() as connection:
-        accounts = pd.read_sql_query("SELECT * FROM auto_strategy_accounts", connection)
-        positions = pd.read_sql_query("SELECT * FROM auto_strategy_positions", connection)
-        trades = pd.read_sql_query(
-            "SELECT * FROM auto_strategy_trades WHERE closed_at >= ? ORDER BY closed_at DESC",
-            connection, params=(start,),
-        )
+    if central_tables is not None:
+        positions = central_tables.get("auto_strategy_positions", pd.DataFrame()).copy()
+        trades = central_tables.get("auto_strategy_trades", pd.DataFrame()).copy()
+        if not trades.empty and "closed_at" in trades.columns:
+            closed_at = pd.to_datetime(trades["closed_at"], errors="coerce")
+            trades = trades[closed_at >= pd.Timestamp(start)].sort_values("closed_at", ascending=False)
+    else:
+        initialize_auto_strategies()
+        with _connect() as connection:
+            positions = pd.read_sql_query("SELECT * FROM auto_strategy_positions", connection)
+            trades = pd.read_sql_query(
+                "SELECT * FROM auto_strategy_trades WHERE closed_at >= ? ORDER BY closed_at DESC",
+                connection, params=(start,),
+            )
     summaries = []
     for strategy in STRATEGIES:
         subset = trades[trades["strategy"] == strategy] if not trades.empty else trades

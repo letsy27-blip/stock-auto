@@ -7,6 +7,7 @@ import pandas as pd
 
 from auto_strategy import DB_PATH as STRATEGY_DB_PATH, initialize_auto_strategies, update_auto_strategies
 from central_store import (
+    publish_dashboard_state,
     publish_latest_scores,
     publish_strategy_state,
     restore_strategy_state,
@@ -353,6 +354,15 @@ def run_once():
     except Exception as exc:
         # 수집 데이터는 로컬에도 먼저 저장되어 있으므로 중앙 장애가 수집 자체를 망치지 않게 한다.
         print(f"중앙 DB 갱신 건너뜀: {exc}")
+    try:
+        dashboard_time = publish_dashboard_state(
+            STRATEGY_DB_PATH,
+            scored_df,
+            source="github-actions" if os.getenv("GITHUB_ACTIONS") else "local-collector",
+        )
+        print(f"중앙 화면 데이터 갱신 완료: {dashboard_time}")
+    except Exception as exc:
+        print(f"중앙 화면 데이터 갱신 실패: {exc}")
     print(
         "자동전략 갱신: "
         f"가상 매수 {strategy_result['opened']}건, 가상 청산 {strategy_result['closed']}건"

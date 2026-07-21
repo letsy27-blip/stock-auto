@@ -15,7 +15,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from auto_strategy import get_strategy_performance, get_top3_signal_status
-from central_store import load_latest_scores
+from central_store import load_dashboard_state
 from ai.gemini_client import DEFAULT_MODEL, stream_chat
 from kis_api import get_access_token, get_current_price
 from market_data import get_market_overview
@@ -2629,6 +2629,10 @@ def show_today_top(
     ].copy()
 
     st.subheader(f"{selected_date} 추천점수 TOP30")
+    if today_df.empty:
+        st.warning(f"조회 날짜 {selected_date} · 조회 결과 0건")
+        return
+    st.caption(f"조회 날짜 {selected_date} · 조회 결과 {len(today_df):,}건")
     order_confirmation = st.session_state.pop("top30_paper_order_confirmation", None)
     if order_confirmation:
         st.success(order_confirmation)
@@ -3122,7 +3126,11 @@ def show_market_overview():
         for error in errors:
             st.warning(error)
 
-def show_prediction_performance_summary(show_details: bool = True):
+def show_prediction_performance_summary(
+    show_details: bool = True,
+    central_tables: dict[str, pd.DataFrame] | None = None,
+    central_updated_at: pd.Timestamp | None = None,
+):
     """TOP3·TOP30·사용자 모의투자의 실제 청산 성과를 비교한다."""
     if show_details:
         st.subheader("기간별 수익률")
@@ -3133,7 +3141,7 @@ def show_prediction_performance_summary(show_details: bool = True):
     else:
         st.subheader("오늘 수익률 요약")
         period = "일간"
-    summary, positions, trades = get_strategy_performance(period)
+    summary, positions, trades = get_strategy_performance(period, central_tables=central_tables)
 
     now = pd.Timestamp.now()
     period_starts = {
@@ -3272,6 +3280,13 @@ def show_prediction_performance_summary(show_details: bool = True):
             if top30_positions.empty:
                 st.info("아직 TOP30 가상매수 종목이 없습니다. 2026-07-20 장 시작 후 자동 기록됩니다.")
             else:
+                if "opened_at" in top30_positions.columns:
+                    top30_positions["opened_at"] = pd.to_datetime(
+                        top30_positions["opened_at"], errors="coerce"
+                    )
+                    top30_positions = top30_positions.sort_values(
+                        "opened_at", ascending=False
+                    )
                 position_view = top30_positions[
                     ["strategy", "stock_name", "quantity", "entry_price", "target_price",
                      "stop_price", "entry_score", "entry_rank", "opened_at"]
@@ -3281,6 +3296,13 @@ def show_prediction_performance_summary(show_details: bool = True):
                     "entry_score": "진입점수", "entry_rank": "진입순위", "opened_at": "매수시각",
                 })
                 st.dataframe(position_view, use_container_width=True, hide_index=True)
+                if central_updated_at is not None:
+                    st.caption(
+                        "Supabase 최신 분석 묶음: "
+                        + central_updated_at.tz_convert("Asia/Seoul").strftime(
+                            "%Y-%m-%d %H:%M:%S KST"
+                        )
+                    )
     if show_details and trades is not None and not trades.empty:
         with st.expander(f"{period} 청산 내역"):
             trade_view = trades[
@@ -3847,7 +3869,7 @@ def show_today_preparation_and_recommendations(
     )
 
 
-def show_intraday_flow(snapshot_df: pd.DataFrame):
+def show_intraday_flow(snapshot_df: pd.DataFrame, event_df: pd.DataFrame):
     st.header("장중 흐름")
 
     tab1, tab2, tab3 = st.tabs(
@@ -3865,8 +3887,6 @@ def show_intraday_flow(snapshot_df: pd.DataFrame):
         show_intraday_repeat(snapshot_df)
 
     with tab3:
-        event_df = load_table("market_event_history")
-
         if event_df.empty:
             st.info("오늘 저장된 진입·이탈 이벤트가 없습니다.")
         else:
@@ -5085,68 +5105,74 @@ def main():
     )
     st.caption(market_regime_quote(header_regime["regime"]))
 
-    # 집과 회사 모두 이 프로젝트 폴더에 있는 Google Drive 공용 DB만 사용한다.
+    central_tables, central_current_df, central_updated_at, central_error = load_dashboard_state()
+    if central_error:
+        st.error(f"중앙 DB 연결 실패: {central_error}")
+        st.caption("오래된 로컬 SQLite 데이터는 대신 표시하지 않습니다.")
+        return
 
-    all_score_df = normalize_score_df(
-        load_table("score")
-    )
+    def central_table(name: str) -> pd.DataFrame:
+        return central_tables.get(name, pd.DataFrame()).copy()
+
+    all_score_df = normalize_score_df(central_table("score"))
 
     history_df = all_score_df.copy()
-    snapshot_df = load_table("intraday_snapshot")
+    snapshot_df = central_table("intraday_snapshot")
 
     # 현재 추천 화면은 같은 DB 안의 최신 장중 스냅샷을 단일 기준으로 삼는다.
     # score 테이블에는 재분석 시점별 묶음이 함께 쌓이므로 단순히 가장 늦게
     # 저장된 묶음을 고르면 다른 PC에서 보던 장 마감 순위와 달라질 수 있다.
     current_df = pd.DataFrame()
-    central_df, central_snapshot_at = load_latest_scores()
-    if not central_df.empty:
-        current_df = normalize_score_df(central_df)
-        if central_snapshot_at is not None:
-            central_kst = central_snapshot_at.tz_convert("Asia/Seoul")
-            current_df["저장일자"] = central_kst.strftime("%Y-%m-%d")
+    if not central_current_df.empty:
+        current_df = normalize_score_df(central_current_df)
+        if central_updated_at is not None:
+            central_kst = central_updated_at.tz_convert("Asia/Seoul")
+            current_df["저장일자"] = central_kst.date()
             current_df["저장시간"] = central_kst.strftime("%H:%M:%S")
-    if current_df.empty and not snapshot_df.empty and "스냅샷일시" in snapshot_df.columns:
-        snapshot_datetime = pd.to_datetime(
-            snapshot_df["스냅샷일시"], errors="coerce"
-        )
-        latest_snapshot = snapshot_datetime.max()
-        if pd.notna(latest_snapshot):
-            current_df = normalize_score_df(
-                snapshot_df[snapshot_datetime == latest_snapshot].copy()
-            )
-
-    # 장중 스냅샷이 아직 없는 초기 DB에서만 score의 최신 묶음을 사용한다.
-    if current_df.empty and not all_score_df.empty:
-        update_datetime = pd.to_datetime(
-            all_score_df["저장일자"].astype(str)
-            + " "
-            + all_score_df["저장시간"].astype(str),
-            errors="coerce",
-        )
-        latest_update = update_datetime.max()
-        current_df = all_score_df[update_datetime == latest_update].copy()
 
     current_df = enrich_current_signals(current_df, all_score_df)
 
-    chart_df = load_table("chart_history")
+    chart_df = central_table("chart_history")
 
     supply_df = normalize_supply_df(
-        load_table("supply_demand")
+        central_table("supply_demand")
     )
 
     news_df = normalize_news_df(
-        load_table("news_history")
+        central_table("news_history")
     )
     master_df = normalize_master_df(
-        load_table("stock_master")
+        central_table("stock_master")
     )
 
     classification_df = normalize_classification_df(
-        load_table("stock_classification")
+        central_table("stock_classification")
     )
 
     theme_history_df = normalize_theme_history_df(
-        load_table("stock_theme_history")
+        central_table("stock_theme_history")
+    )
+    event_df = central_table("market_event_history")
+
+    code_version = (
+        os.getenv("STREAMLIT_GIT_COMMIT")
+        or os.getenv("GITHUB_SHA")
+        or os.getenv("RENDER_GIT_COMMIT")
+        or "로컬/확인 불가"
+    )
+    latest_analysis_date = (
+        max(all_score_df["저장일자"].dropna())
+        if not all_score_df.empty and "저장일자" in all_score_df.columns
+        and not all_score_df["저장일자"].dropna().empty
+        else "데이터 없음"
+    )
+    central_kst_text = (
+        central_updated_at.tz_convert("Asia/Seoul").strftime("%Y-%m-%d %H:%M:%S KST")
+        if central_updated_at is not None else "확인 불가"
+    )
+    st.caption(
+        f"코드 {code_version[:12]} · 데이터 원본 Supabase 중앙 DB · "
+        f"중앙 DB 갱신 {central_kst_text} · 최신 분석일 {latest_analysis_date}"
     )
 
     if "active_dashboard_page" not in st.session_state:
@@ -5241,7 +5267,7 @@ def main():
     sidebar_page_button("과거 분석", "과거 분석", "nav_history")
 
     st.sidebar.markdown("## 💰 모의투자")
-    sidebar_page_button("수익률", "수익률", "nav_strategy_performance")
+    sidebar_page_button("수익 분석", "수익률", "nav_strategy_performance")
     sidebar_page_button("모의 주문", "모의 주문", "nav_paper_order")
     sidebar_page_button("보유 종목", "보유 종목", "nav_paper_positions")
     sidebar_page_button("거래 내역", "거래 내역", "nav_paper_history")
@@ -5254,9 +5280,13 @@ def main():
     menu = st.session_state["active_dashboard_page"]
 
     if menu == "수익률":
-        st.header("수익률")
+        st.header("수익 분석")
         st.caption("TOP3·TOP30·모의투자의 실제 청산 수익률을 비교합니다.")
-        show_prediction_performance_summary(show_details=True)
+        show_prediction_performance_summary(
+            show_details=True,
+            central_tables=central_tables,
+            central_updated_at=central_updated_at,
+        )
         return
 
     if menu in {"모의 주문", "보유 종목", "거래 내역", "투자 성향"}:
@@ -5315,14 +5345,20 @@ def main():
         show_current_status_banner(current_df)
 
         if current_df.empty:
+            queried_date = (
+                central_updated_at.tz_convert("Asia/Seoul").date()
+                if central_updated_at is not None else pd.Timestamp.now().date()
+            )
+            st.warning(f"조회 날짜 {queried_date} · 조회 결과 0건")
             return
 
         display_df = current_df.copy()
-        available_dates = pd.to_datetime(
+        display_df["저장일자"] = pd.to_datetime(
             display_df.get("저장일자"), errors="coerce"
-        ).dropna()
+        ).dt.date
+        available_dates = display_df["저장일자"].dropna()
         selected_date = (
-            available_dates.max().date()
+            max(available_dates)
             if not available_dates.empty else pd.Timestamp.now().date()
         )
 
@@ -5338,7 +5374,7 @@ def main():
         return
 
     if menu == "장중 흐름":
-        show_intraday_flow(snapshot_df)
+        show_intraday_flow(snapshot_df, event_df)
         return
 
     if menu == "종목 검색":

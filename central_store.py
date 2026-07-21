@@ -21,6 +21,16 @@ def _settings(write: bool = False) -> tuple[str, str]:
     key = os.getenv(key_name, "")
     if not key and not write:
         key = os.getenv("SUPABASE_PUBLISHABLE_KEY", "")
+    if not url or not key:
+        try:
+            import streamlit as st
+
+            url = url or str(st.secrets.get("SUPABASE_URL", "")).rstrip("/")
+            key = key or str(st.secrets.get(key_name, ""))
+            if not key and not write:
+                key = str(st.secrets.get("SUPABASE_PUBLISHABLE_KEY", ""))
+        except Exception:
+            pass
     return url, key
 
 
@@ -73,11 +83,11 @@ def publish_latest_scores(scored_df: pd.DataFrame, source: str = "collector") ->
     return snapshot_at
 
 
-def load_latest_scores() -> tuple[pd.DataFrame, pd.Timestamp | None]:
-    """Read the shared current ranking. Returns an empty frame when unavailable."""
+def load_latest_scores() -> tuple[pd.DataFrame, pd.Timestamp | None, str | None]:
+    """Read the shared current ranking and keep connection failures explicit."""
     url, key = _settings(write=False)
     if not url or not key:
-        return pd.DataFrame(), None
+        return pd.DataFrame(), None, "Supabase read credentials are not configured"
     try:
         response = requests.get(
             f"{url}/rest/v1/hongstock_state",
@@ -88,15 +98,96 @@ def load_latest_scores() -> tuple[pd.DataFrame, pd.Timestamp | None]:
         response.raise_for_status()
         rows = response.json()
         if not rows:
-            return pd.DataFrame(), None
+            return pd.DataFrame(), None, "Supabase latest_scores row is missing"
         value = rows[0].get("value") or {}
         frame = pd.DataFrame(value.get("scores") or [])
         timestamp = pd.to_datetime(value.get("snapshot_at"), errors="coerce", utc=True)
         if pd.isna(timestamp):
             timestamp = None
-        return frame, timestamp
-    except (requests.RequestException, ValueError, TypeError):
-        return pd.DataFrame(), None
+        return frame, timestamp, None
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        return pd.DataFrame(), None, f"Supabase latest_scores read failed: {exc}"
+
+
+DASHBOARD_TABLES = (
+    "score",
+    "score_current",
+    "intraday_snapshot",
+    "market_event_history",
+    "chart_history",
+    "supply_demand",
+    "news_history",
+    "stock_master",
+    "stock_classification",
+    "stock_theme_history",
+    "auto_strategy_accounts",
+    "auto_strategy_positions",
+    "auto_strategy_trades",
+)
+
+
+def publish_dashboard_state(
+    db_path: str | os.PathLike,
+    current_scores: pd.DataFrame,
+    source: str = "collector",
+) -> str:
+    """Publish one authoritative dashboard bundle without changing DB schema."""
+    url, key = _settings(write=True)
+    if not url or not key:
+        raise RuntimeError("Supabase central write credentials are not configured")
+    with sqlite3.connect(db_path) as connection:
+        tables = {
+            table: _records(pd.read_sql_query(f'SELECT * FROM "{table}"', connection))
+            for table in DASHBOARD_TABLES
+        }
+    snapshot_at = datetime.now(timezone.utc).isoformat()
+    response = requests.post(
+        f"{url}/rest/v1/hongstock_state?on_conflict=key",
+        headers=_headers(key, "resolution=merge-duplicates,return=minimal"),
+        json={
+            "key": "dashboard_state",
+            "value": {
+                "snapshot_at": snapshot_at,
+                "source": source,
+                "current_scores": _records(current_scores),
+                "tables": tables,
+            },
+            "updated_at": snapshot_at,
+        },
+        timeout=90,
+    )
+    response.raise_for_status()
+    return snapshot_at
+
+
+def load_dashboard_state() -> tuple[dict[str, pd.DataFrame], pd.DataFrame, pd.Timestamp | None, str | None]:
+    """Load the central screen bundle; never substitute local SQLite on failure."""
+    url, key = _settings(write=False)
+    if not url or not key:
+        return {}, pd.DataFrame(), None, "Supabase read credentials are not configured"
+    try:
+        response = requests.get(
+            f"{url}/rest/v1/hongstock_state",
+            headers=_headers(key),
+            params={"key": "eq.dashboard_state", "select": "value", "limit": "1"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if not rows:
+            return {}, pd.DataFrame(), None, "Supabase dashboard_state row is missing"
+        value = rows[0].get("value") or {}
+        tables = {
+            name: pd.DataFrame(records or [])
+            for name, records in (value.get("tables") or {}).items()
+        }
+        current_scores = pd.DataFrame(value.get("current_scores") or [])
+        timestamp = pd.to_datetime(value.get("snapshot_at"), errors="coerce", utc=True)
+        if pd.isna(timestamp):
+            timestamp = None
+        return tables, current_scores, timestamp, None
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        return {}, pd.DataFrame(), None, f"Supabase dashboard_state read failed: {exc}"
 
 
 STRATEGY_TABLES = (
