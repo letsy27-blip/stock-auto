@@ -17,6 +17,10 @@ _TOKEN_LOCK = threading.Lock()
 _TOKEN_CACHE_FILE = Path(__file__).resolve().with_name(".kis_token_cache.json")
 
 
+def is_configured() -> bool:
+    return bool(APP_KEY and APP_SECRET)
+
+
 def _headers(token: str, tr_id: str) -> dict:
     return {
         "content-type": "application/json; charset=utf-8",
@@ -66,6 +70,8 @@ def _persist_token(token: str, expires_at: float) -> None:
 def get_access_token():
     # KIS는 접근토큰 발급을 분당 1회로 제한한다. 대시보드의 반복 렌더링에서는
     # 이미 받은 토큰을 재사용해야 현재가·실시간 시세가 정상 동작한다.
+    if not is_configured():
+        return None
     with _TOKEN_LOCK:
         if _TOKEN_CACHE["value"] and time.time() < _TOKEN_CACHE["expires_at"]:
             return str(_TOKEN_CACHE["value"])

@@ -28,7 +28,7 @@ from dashboard_data import (
     select_morning_briefing,
 )
 from ai.gemini_client import DEFAULT_MODEL, stream_chat
-from kis_api import get_access_token, get_current_price
+from kis_api import get_access_token, get_current_price, is_configured as is_kis_configured
 from market_data import get_market_overview
 from market_regime import classify_market_regime
 from realtime_quotes import get_realtime_quote_hub
@@ -2988,6 +2988,10 @@ def show_stock_search(
 # -----------------------------
 @st.cache_data(ttl=20, show_spinner=False)
 def load_market_overview_cached():
+    if not is_kis_configured():
+        return {
+            "error": "KIS 실시간 시세 설정이 없습니다. KIS_APP_KEY와 KIS_APP_SECRET을 설정해 주세요."
+        }
     token = get_access_token()
     if not token:
         return {
