@@ -603,6 +603,19 @@ def apply_display_theme(theme: str) -> None:
             color: #E5E7EB !important;
             border-color: #374151 !important;
         }
+        [data-testid="stExpander"] details > summary,
+        [data-testid="stExpander"] details > summary:hover,
+        [data-testid="stExpander"] details > summary:focus,
+        [data-testid="stExpander"] details > summary > div,
+        [data-testid="stExpander"] details > summary [data-testid="stMarkdownContainer"] {
+            background: #171B21 !important;
+            color: #E5E7EB !important;
+        }
+        [data-testid="stExpander"] details > summary p,
+        [data-testid="stExpander"] details > summary svg {
+            color: #E5E7EB !important;
+            fill: #E5E7EB !important;
+        }
         [data-testid="stAppViewContainer"] input,
         [data-testid="stAppViewContainer"] textarea,
         [data-testid="stAppViewContainer"] [data-baseweb="select"] > div {
@@ -3298,7 +3311,7 @@ def show_prediction_performance_summary(show_details: bool = True):
         st.dataframe(display, use_container_width=True, hide_index=True)
 
         if not top3_status.empty:
-            with st.expander("TOP3 매수·매도 판단 상세"):
+            with st.expander("결합전략 그림자 검증 · TOP3 매수·매도 판단 상세"):
                 status_view = top3_status.drop(columns=["스냅샷"]).copy()
                 for column in ["현재가", "목표가", "손절가"]:
                     status_view[column] = status_view[column].map(lambda value: f"{value:,.0f}원")
@@ -3308,7 +3321,7 @@ def show_prediction_performance_summary(show_details: bool = True):
                     "분석 매수 신호가 발생하면 진입하고, 분석 매도 신호가 발생하면 청산합니다. 목표가·손절가는 안전장치입니다."
                 )
 
-        with st.expander("🧪 실제 일봉 한 달 워크포워드 백테스트", expanded=True):
+        with st.expander("결합전략 그림자 검증 · 실제 일봉 한 달 워크포워드 백테스트", expanded=True):
             st.warning(
                 "과거 실제 일봉을 날짜순으로 재생한 백테스트입니다. 당시의 완전한 뉴스·수급 스냅샷은 "
                 "4일치뿐이므로 가격 추세·거래량으로 매일 순위를 재산출한 결과이며 미래 수익을 보장하지 않습니다."
@@ -3355,7 +3368,7 @@ def show_prediction_performance_summary(show_details: bool = True):
         if positions is not None and not positions.empty else pd.DataFrame()
     )
     if show_details:
-        with st.expander("TOP30 매수·매도 판단 상세"):
+        with st.expander("결합전략 그림자 검증 · TOP30 매수·매도 판단 상세"):
             if top30_positions.empty:
                 st.info("아직 TOP30 가상매수 종목이 없습니다. 2026-07-20 장 시작 후 자동 기록됩니다.")
             else:
