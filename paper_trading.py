@@ -115,6 +115,19 @@ def record_behavior_event(event_type: str, stock_code: str = "", stock_name: str
         )
 
 
+def _parse_event_metadata(value) -> dict:
+    """SQLite 문자열과 Supabase JSON 객체를 같은 형태로 정규화한다."""
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def get_investor_profile(days: int = 30) -> dict:
     """최근 행동을 바탕으로 성향과 충동 진입 경고를 계산한다."""
     since = (datetime.now() - timedelta(days=max(1, int(days)))).isoformat(timespec="seconds")
@@ -130,7 +143,7 @@ def get_investor_profile(days: int = 30) -> dict:
     if events.empty:
         return default
     events["occurred_at"] = pd.to_datetime(events["occurred_at"], errors="coerce")
-    events["metadata"] = events["metadata_json"].map(lambda value: json.loads(value) if value else {})
+    events["metadata"] = events["metadata_json"].map(_parse_event_metadata)
     events["chase_risk"] = events["metadata"].map(lambda value: float(value.get("chase_risk", 0) or 0))
     counts = events["event_type"].value_counts()
     searches, views, buys, sells = (int(counts.get(key, 0)) for key in ("search", "view", "BUY", "SELL"))
