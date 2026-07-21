@@ -1,7 +1,4 @@
-"""HONG STOCK 공개 앱의 Supabase 로그인 도우미.
-
-Supabase 환경 변수가 없으면 기존 로컬 모드가 유지된다.
-"""
+"""HONG STOCK 중앙 앱의 Supabase 로그인 도우미."""
 
 import os
 from typing import Any
@@ -25,7 +22,7 @@ def supabase_url() -> str:
 
 
 def supabase_anon_key() -> str:
-    return _setting("SUPABASE_ANON_KEY")
+    return _setting("SUPABASE_ANON_KEY") or _setting("SUPABASE_PUBLISHABLE_KEY")
 
 
 def is_configured() -> bool:

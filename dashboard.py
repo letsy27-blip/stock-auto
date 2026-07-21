@@ -40,7 +40,7 @@ from sector_theme_strength import (
     make_industry_strength,
     make_theme_strength,
 )
-from supabase_auth import is_admin_user, show_auth_sidebar
+from supabase_auth import is_admin_user, is_configured as is_auth_configured, show_auth_sidebar
 from strategy_backtest import run_walk_forward_backtest
 
 
@@ -5199,6 +5199,14 @@ def show_hongstock_welcome() -> bool:
 # 메인
 # -----------------------------
 def main():
+    if not is_auth_configured():
+        st.error("Supabase 로그인 설정이 없어 대시보드를 열 수 없습니다.")
+        st.caption(
+            "SUPABASE_URL과 SUPABASE_ANON_KEY 또는 "
+            "SUPABASE_PUBLISHABLE_KEY를 설정해 주세요."
+        )
+        st.stop()
+
     st.title("HONG STOCK")
     header_overview = load_market_overview_cached()
     header_regime = classify_market_regime(
