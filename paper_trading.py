@@ -119,13 +119,27 @@ def _parse_event_metadata(value) -> dict:
     """SQLite 문자열과 Supabase JSON 객체를 같은 형태로 정규화한다."""
     if isinstance(value, dict):
         return value
-    if not value:
+    if value is None:
         return {}
     try:
         parsed = json.loads(str(value))
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _safe_chase_risk(metadata) -> float:
+    """과거 기록의 비정상 추격위험 값이 성향 화면을 중단시키지 않게 한다."""
+    if not isinstance(metadata, dict):
+        return 0.0
+    value = metadata.get("chase_risk", 0)
+    if isinstance(value, dict):
+        value = value.get("value", 0)
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if pd.notna(number) else 0.0
 
 
 def get_investor_profile(days: int = 30) -> dict:
@@ -142,9 +156,23 @@ def get_investor_profile(days: int = 30) -> dict:
             events = pd.read_sql_query("SELECT * FROM investor_behavior_events WHERE occurred_at >= ? ORDER BY occurred_at", connection, params=(since,))
     if events.empty:
         return default
+    events = events.copy()
+    column_defaults = {
+        "occurred_at": None,
+        "event_type": "",
+        "stock_code": "",
+        "stock_name": "",
+        "metadata_json": None,
+    }
+    for column, default_value in column_defaults.items():
+        if column not in events.columns:
+            events[column] = default_value
     events["occurred_at"] = pd.to_datetime(events["occurred_at"], errors="coerce")
+    events["event_type"] = events["event_type"].fillna("").astype(str)
+    events["stock_code"] = events["stock_code"].fillna("").astype(str)
+    events["stock_name"] = events["stock_name"].fillna("").astype(str)
     events["metadata"] = events["metadata_json"].map(_parse_event_metadata)
-    events["chase_risk"] = events["metadata"].map(lambda value: float(value.get("chase_risk", 0) or 0))
+    events["chase_risk"] = events["metadata"].map(_safe_chase_risk)
     counts = events["event_type"].value_counts()
     searches, views, buys, sells = (int(counts.get(key, 0)) for key in ("search", "view", "BUY", "SELL"))
     risk_samples = events[events["event_type"].isin(["search", "view"])]
@@ -152,8 +180,12 @@ def get_investor_profile(days: int = 30) -> dict:
     rapid_entry_count = 0
     for _, buy in events[events["event_type"] == "BUY"].iterrows():
         prior = events[(events["stock_code"] == buy["stock_code"]) & (events["event_type"].isin(["search", "view"])) & (events["occurred_at"] <= buy["occurred_at"])]
-        if not prior.empty and 0 <= (buy["occurred_at"] - prior["occurred_at"].iloc[-1]).total_seconds() / 60 <= 10:
-            rapid_entry_count += 1
+        if not prior.empty and pd.notna(buy["occurred_at"]):
+            prior_time = prior["occurred_at"].dropna()
+            if not prior_time.empty:
+                elapsed_minutes = (buy["occurred_at"] - prior_time.iloc[-1]).total_seconds() / 60
+                if 0 <= elapsed_minutes <= 10:
+                    rapid_entry_count += 1
     activity = events.groupby(["stock_code", "stock_name", "event_type"]).size().unstack(fill_value=0)
     values = lambda key: activity[key].to_numpy() if key in activity.columns else pd.Series(0, index=activity.index).to_numpy()
     favorites = pd.DataFrame({"종목코드": activity.index.get_level_values("stock_code"), "종목명": activity.index.get_level_values("stock_name"), "열람·검색": values("search") + values("view"), "매수": values("BUY"), "매도": values("SELL")})
