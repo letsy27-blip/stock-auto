@@ -89,6 +89,11 @@ def _auth_request(path: str, payload: dict[str, Any]) -> dict[str, Any]:
             message = response.json().get("msg") or response.json().get("message")
         except ValueError:
             message = ""
+        if message == "Invalid login credentials":
+            message = (
+                "이메일 또는 비밀번호가 맞지 않습니다. "
+                "계정이 없다면 회원가입을, 비밀번호를 잊었다면 재설정을 이용해 주세요."
+            )
         raise ValueError(message or "로그인 요청을 처리하지 못했습니다.")
     return response.json()
 
@@ -119,6 +124,13 @@ def sign_up(email: str, password: str, nickname: str, analytics_consent: bool) -
         st.session_state["hongstock_auth_session"] = data
         return True
     return False
+
+
+def request_password_reset(email: str) -> None:
+    normalized_email = email.strip()
+    if not normalized_email or "@" not in normalized_email:
+        raise ValueError("비밀번호를 재설정할 이메일을 입력해 주세요.")
+    _auth_request("/auth/v1/recover", {"email": normalized_email})
 
 
 def sign_out() -> None:
@@ -165,6 +177,19 @@ def show_auth_sidebar() -> dict[str, Any] | None:
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
+        with st.expander("비밀번호를 잊으셨나요?"):
+            with st.form("hongstock_password_reset_form"):
+                reset_email = st.text_input(
+                    "재설정 이메일",
+                    key="hongstock_password_reset_email",
+                )
+                reset_submitted = st.form_submit_button("재설정 메일 보내기")
+            if reset_submitted:
+                try:
+                    request_password_reset(reset_email)
+                    st.success("비밀번호 재설정 메일을 보냈습니다. 메일함을 확인해 주세요.")
+                except Exception as exc:
+                    st.error(str(exc))
 
     with signup_tab:
         with st.form("hongstock_signup_form"):
