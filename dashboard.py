@@ -3405,6 +3405,8 @@ def show_prediction_performance_summary(show_details: bool = True):
         "USER_TOP30": "내 기존전략 TOP30",
         "TOP3": "보완 그림자전략 TOP3",
         "TOP30": "보완 그림자전략 TOP30",
+        "내 기존전략": "내 기존전략",
+        "보완 그림자전략": "보완 그림자전략",
         "내 모의투자": "내 직접 모의투자",
         "내 모의투자(로그인 필요)": "내 직접 모의투자 · 로그인 필요",
     }
@@ -3445,43 +3447,48 @@ def show_prediction_performance_summary(show_details: bool = True):
         display["기간수익률(%)"] = display["기간수익률(%)"].map(lambda value: f"{value:+.2f}%")
         return display
 
+    def combine_strategy_rows(frame: pd.DataFrame, name: str, account_count: int) -> pd.Series:
+        completed = int(pd.to_numeric(frame["청산거래"], errors="coerce").fillna(0).sum())
+        wins = int(pd.to_numeric(frame["수익거래"], errors="coerce").fillna(0).sum())
+        losses = int(pd.to_numeric(frame["손실거래"], errors="coerce").fillna(0).sum())
+        profit = float(pd.to_numeric(frame["실현손익"], errors="coerce").fillna(0).sum())
+        positions_count = int(pd.to_numeric(frame["보유종목"], errors="coerce").fillna(0).sum())
+        return pd.Series({
+            "전략": name,
+            "청산거래": completed,
+            "수익거래": wins,
+            "손실거래": losses,
+            "성공률(%)": wins / completed * 100 if completed else None,
+            "실현손익": profit,
+            "기간수익률(%)": profit / (100_000_000 * account_count) * 100,
+            "보유종목": positions_count,
+        })
+
     user_strategy_summary = ordered_rows(auto_summary, ["USER_TOP3", "USER_TOP30"])
     shadow_strategy_summary = ordered_rows(auto_summary, ["TOP3", "TOP30"])
-    manual_summary = pd.DataFrame([manual])
 
-    st.markdown(f"### 자동매매 전략 비교 · {period_label}")
-    strategy_groups = st.columns(2)
-    with strategy_groups[0]:
-        st.markdown("#### 내 기존전략 · 사용자 로직")
-        st.caption("최종점수와 추천 순위 조건으로 자동 가상매수·매도합니다.")
-        cards = st.columns(2)
-        for card, (_, row) in zip(cards, user_strategy_summary.iterrows()):
-            render_performance_card(card, row)
-    with strategy_groups[1]:
-        st.markdown("#### 보완 그림자전략 · 보완 로직")
-        st.caption("돌파·추격위험·RSI·수급·시장상태를 추가 확인합니다.")
-        cards = st.columns(2)
-        for card, (_, row) in zip(cards, shadow_strategy_summary.iterrows()):
-            render_performance_card(card, row)
+    combined_user = combine_strategy_rows(user_strategy_summary, "내 기존전략", 2)
+    combined_shadow = combine_strategy_rows(shadow_strategy_summary, "보완 그림자전략", 2)
+    combined_summary = pd.DataFrame([combined_user, combined_shadow, manual])
+
+    st.markdown(f"### 전략별 수익률 · {period_label}")
+    strategy_cards = st.columns(3)
+    card_descriptions = [
+        "TOP3·TOP30 사용자 로직 합산",
+        "TOP3·TOP30 보완 로직 합산",
+        "모의 주문에서 직접 매수·매도",
+    ]
+    for column, (_, row), description in zip(
+        strategy_cards, combined_summary.iterrows(), card_descriptions
+    ):
+        with column:
+            with st.container(border=True):
+                st.caption(description)
+                render_performance_card(st, row)
 
     if show_details:
-        auto_display = pd.concat(
-            [user_strategy_summary, shadow_strategy_summary], ignore_index=True
-        )
         st.dataframe(
-            format_performance_table(auto_display),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    st.divider()
-    st.markdown(f"### 내 직접 모의투자 · {period_label}")
-    st.caption("모의 주문 메뉴에서 사용자가 직접 매수·매도한 별도 계좌입니다. 자동전략과 섞이지 않습니다.")
-    manual_card = st.columns([1, 1])[0]
-    render_performance_card(manual_card, manual)
-    if show_details:
-        st.dataframe(
-            format_performance_table(manual_summary),
+            format_performance_table(combined_summary),
             use_container_width=True,
             hide_index=True,
         )
