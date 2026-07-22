@@ -3469,7 +3469,11 @@ def show_prediction_performance_summary(show_details: bool = True):
 
     combined_user = combine_strategy_rows(user_strategy_summary, "내 기존전략", 2)
     combined_shadow = combine_strategy_rows(shadow_strategy_summary, "보완 그림자전략", 2)
-    combined_summary = pd.DataFrame([combined_user, combined_shadow, manual])
+    combined_summary = pd.DataFrame([
+        combined_user.to_dict(),
+        combined_shadow.to_dict(),
+        manual,
+    ])
 
     st.markdown(f"### 전략별 수익률 · {period_label}")
     strategy_cards = st.columns(3)
