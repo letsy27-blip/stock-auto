@@ -65,12 +65,18 @@ def initialize_account() -> None:
 
 
 def get_account() -> dict[str, Any]:
-    initialize_account()
     rows = _request(
         "GET",
         "/rest/v1/paper_accounts",
         params={"select": "cash,initial_cash,updated_at", "limit": "1"},
     )
+    if not rows:
+        initialize_account()
+        rows = _request(
+            "GET",
+            "/rest/v1/paper_accounts",
+            params={"select": "cash,initial_cash,updated_at", "limit": "1"},
+        )
     if not rows:
         raise RuntimeError("모의 계좌를 준비하지 못했습니다.")
     return dict(rows[0])
