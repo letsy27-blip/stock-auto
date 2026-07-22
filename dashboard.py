@@ -3353,14 +3353,16 @@ def show_prediction_performance_summary(show_details: bool = True):
     """TOP3·TOP30·사용자 모의투자의 실제 청산 성과를 비교한다."""
     if show_details:
         st.subheader("기간별 수익률")
-        period = st.radio(
-            "성과 기간", ["일간", "주간", "월간", "연간"],
+        period_label = st.radio(
+            "수익률 기간", ["일별", "주별", "월별", "연간"],
             horizontal=True, key="strategy_performance_period",
         )
+        period = {"일별": "일간", "주별": "주간", "월별": "월간", "연간": "연간"}[period_label]
     else:
         st.subheader("오늘 수익률 요약")
+        period_label = "일별"
         period = "일간"
-    summary, positions, trades = get_strategy_performance(period, db_path=DB_PATH)
+    auto_summary, positions, trades = get_strategy_performance(period, db_path=DB_PATH)
 
     now = pd.Timestamp.now(tz="Asia/Seoul")
     period_starts = {
@@ -3398,20 +3400,16 @@ def show_prediction_performance_summary(show_details: bool = True):
                 "성공률(%)": wins / completed * 100, "실현손익": profit,
                 "기간수익률(%)": profit / 100_000_000 * 100,
             })
-    summary = pd.concat([summary, pd.DataFrame([manual])], ignore_index=True)
-
     labels = {
         "USER_TOP3": "내 기존전략 TOP3",
         "USER_TOP30": "내 기존전략 TOP30",
         "TOP3": "보완 그림자전략 TOP3",
         "TOP30": "보완 그림자전략 TOP30",
-        "내 모의투자": "모의투자 수익률",
-        "내 모의투자(로그인 필요)": "모의투자 수익률 · 로그인 필요",
+        "내 모의투자": "내 직접 모의투자",
+        "내 모의투자(로그인 필요)": "내 직접 모의투자 · 로그인 필요",
     }
-    cards = []
-    for start in range(0, len(summary), 3):
-        cards.extend(st.columns(min(3, len(summary) - start)))
-    for card, (_, row) in zip(cards, summary.iterrows()):
+
+    def render_performance_card(card, row):
         rate = row["성공률(%)"]
         card.metric(
             labels.get(row["전략"], row["전략"]),
@@ -3430,14 +3428,14 @@ def show_prediction_performance_summary(show_details: bool = True):
             f"보유 {int(row['보유종목'])}종목"
         )
 
-    top3_status = get_top3_signal_status(db_path=DB_PATH)
-    if show_details:
-        st.info(
-            "내 기존전략은 최종점수·추천 순위로 자동 매수·매도하고, "
-            "보완 그림자전략은 돌파·추격위험·RSI·수급·시장상태를 추가로 확인합니다. "
-            "기존 그림자 기록은 유지되며 내 기존전략의 비교 기록은 이번 배포 이후부터 쌓입니다."
-        )
-        display = summary.rename(columns={"전략": "계좌"}).copy()
+    def ordered_rows(frame: pd.DataFrame, strategies: list[str]) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        indexed = frame.set_index("전략", drop=False)
+        return pd.DataFrame([indexed.loc[name] for name in strategies if name in indexed.index])
+
+    def format_performance_table(frame: pd.DataFrame) -> pd.DataFrame:
+        display = frame.rename(columns={"전략": "계좌"}).copy()
         display["계좌"] = display["계좌"].map(labels).fillna(display["계좌"])
         display["성공률(%)"] = display["성공률(%)"].map(
             lambda value: f"{value:.1f}%" if pd.notna(value) else "집계 대기"
@@ -3445,8 +3443,58 @@ def show_prediction_performance_summary(show_details: bool = True):
         display = display.rename(columns={"성공률(%)": "승률(%)"})
         display["실현손익"] = display["실현손익"].map(lambda value: f"{value:+,.0f}원")
         display["기간수익률(%)"] = display["기간수익률(%)"].map(lambda value: f"{value:+.2f}%")
-        st.dataframe(display, use_container_width=True, hide_index=True)
+        return display
 
+    user_strategy_summary = ordered_rows(auto_summary, ["USER_TOP3", "USER_TOP30"])
+    shadow_strategy_summary = ordered_rows(auto_summary, ["TOP3", "TOP30"])
+    manual_summary = pd.DataFrame([manual])
+
+    st.markdown(f"### 자동매매 전략 비교 · {period_label}")
+    strategy_groups = st.columns(2)
+    with strategy_groups[0]:
+        st.markdown("#### 내 기존전략 · 사용자 로직")
+        st.caption("최종점수와 추천 순위 조건으로 자동 가상매수·매도합니다.")
+        cards = st.columns(2)
+        for card, (_, row) in zip(cards, user_strategy_summary.iterrows()):
+            render_performance_card(card, row)
+    with strategy_groups[1]:
+        st.markdown("#### 보완 그림자전략 · 보완 로직")
+        st.caption("돌파·추격위험·RSI·수급·시장상태를 추가 확인합니다.")
+        cards = st.columns(2)
+        for card, (_, row) in zip(cards, shadow_strategy_summary.iterrows()):
+            render_performance_card(card, row)
+
+    if show_details:
+        auto_display = pd.concat(
+            [user_strategy_summary, shadow_strategy_summary], ignore_index=True
+        )
+        st.dataframe(
+            format_performance_table(auto_display),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.divider()
+    st.markdown(f"### 내 직접 모의투자 · {period_label}")
+    st.caption("모의 주문 메뉴에서 사용자가 직접 매수·매도한 별도 계좌입니다. 자동전략과 섞이지 않습니다.")
+    manual_card = st.columns([1, 1])[0]
+    render_performance_card(manual_card, manual)
+    if show_details:
+        st.dataframe(
+            format_performance_table(manual_summary),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    top3_status = get_top3_signal_status(db_path=DB_PATH)
+    if show_details:
+        st.divider()
+        st.markdown("### 자동매매 상세 검증")
+        st.info(
+            "내 기존전략은 최종점수·추천 순위로 자동 매수·매도하고, "
+            "보완 그림자전략은 돌파·추격위험·RSI·수급·시장상태를 추가로 확인합니다. "
+            "기존 그림자 기록은 유지되며 내 기존전략의 비교 기록은 이번 배포 이후부터 쌓입니다."
+        )
         if not top3_status.empty:
             with st.expander("결합전략 그림자 검증 · TOP3 매수·매도 판단 상세"):
                 status_view = top3_status.drop(columns=["스냅샷"]).copy()
@@ -3527,7 +3575,7 @@ def show_prediction_performance_summary(show_details: bool = True):
                 })
                 st.dataframe(position_view, use_container_width=True, hide_index=True)
     if show_details and trades is not None and not trades.empty:
-        with st.expander(f"{period} 청산 내역"):
+        with st.expander(f"자동매매 {period_label} 청산 내역"):
             trade_view = trades[
                 ["strategy", "stock_name", "entry_price", "exit_price", "realized_profit",
                  "return_rate", "opened_at", "closed_at", "exit_reason"]
@@ -5680,11 +5728,8 @@ def main():
 
     if menu == "수익률":
         st.header("수익 분석")
-        st.caption("TOP3·TOP30·모의투자의 실제 청산 수익률을 비교합니다.")
-        st.subheader("결합전략 그림자 검증")
         st.caption(
-            "TOP3·TOP30 결합전략을 실제 주문 없이 자동 추적하며, "
-            "매수·매도 판단과 워크포워드 백테스트 결과를 검증합니다."
+            "자동매매 전략 4개와 사용자가 직접 주문한 모의투자를 분리해 기간별로 확인합니다."
         )
         show_prediction_performance_summary(show_details=True)
         return
