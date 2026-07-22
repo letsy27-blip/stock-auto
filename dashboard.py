@@ -49,7 +49,7 @@ from sector_theme_strength import (
     make_theme_strength,
 )
 from supabase_auth import is_admin_user, is_configured as is_auth_configured, show_auth_sidebar
-from strategy_backtest import run_long_horizon_validation
+import strategy_backtest
 
 
 # 다크 모드에서 캔버스형 dataframe을 HTML 표로 대체할 때 원본 함수를 보관한다.
@@ -3351,7 +3351,18 @@ def show_market_overview():
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_long_validation_cached(database_path: str, database_version: int):
-    return run_long_horizon_validation(database_path, years=5, holdout_ratio=0.20)
+    runner = getattr(strategy_backtest, "run_long_horizon_validation", None)
+    if runner is not None:
+        return runner(database_path, years=5, holdout_ratio=0.20)
+
+    base_dir = Path(__file__).resolve().parent
+    summary = pd.read_csv(base_dir / "backtest_validation_summary.csv")
+    regimes = pd.read_csv(base_dir / "backtest_regime_summary.csv")
+    trades = pd.read_csv(base_dir / "backtest_validation_trades.csv.gz")
+    metadata = json.loads(
+        (base_dir / "backtest_validation_meta.json").read_text(encoding="utf-8")
+    )
+    return summary, regimes, trades, metadata
 
 
 def show_prediction_performance_summary(show_details: bool = True):
