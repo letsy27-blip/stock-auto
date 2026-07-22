@@ -2417,6 +2417,14 @@ def show_stock_detail_by_code(
 # -----------------------------
 # 팝업
 # -----------------------------
+def show_dialog_back_button(key: str, on_back=None) -> None:
+    """ESC 없이 닫을 수 있는 모바일 친화적인 팝업 뒤로 가기 버튼."""
+    if st.button("← 뒤로", key=key, use_container_width=True):
+        if on_back is not None:
+            on_back()
+        st.rerun()
+
+
 def make_stock_dialog(
     score_df: pd.DataFrame,
     chart_df: pd.DataFrame,
@@ -2430,6 +2438,10 @@ def make_stock_dialog(
 
     @st.dialog("종목 상세 분석", width="large", on_dismiss=close_stock_detail_dialog)
     def stock_detail_popup(stock_name: str, stock_code: str):
+        show_dialog_back_button(
+            f"stock_detail_back_{clean_code(stock_code)}",
+            on_back=close_stock_detail_dialog,
+        )
         show_stock_detail_by_code(
             score_df=score_df,
             chart_df=chart_df,
@@ -2478,6 +2490,7 @@ def make_quick_analysis_dialogs(
 
     @st.dialog("매매동향", width="large")
     def trading_popup(stock_name: str, stock_code: str):
+        show_dialog_back_button(f"trading_dialog_back_{clean_code(stock_code)}")
         st.subheader(f"{stock_name} ({clean_code(stock_code)})")
         latest_score = get_latest_score(stock_code)
 
@@ -2493,6 +2506,7 @@ def make_quick_analysis_dialogs(
 
     @st.dialog("뉴스 분석", width="large")
     def news_popup(stock_name: str, stock_code: str):
+        show_dialog_back_button(f"news_dialog_back_{clean_code(stock_code)}")
         st.subheader(f"{stock_name} ({clean_code(stock_code)})")
         latest_score = get_latest_score(stock_code)
 
@@ -2684,6 +2698,7 @@ def make_top30_paper_buy_dialog():
 
     @st.dialog("모의 매수 확인", width="small")
     def paper_buy_popup(stock_name: str, stock_code: str, fallback_price: float = 0.0):
+        show_dialog_back_button(f"paper_buy_dialog_back_{clean_code(stock_code)}")
         if is_remote_storage_enabled() and not is_paper_user_authenticated():
             st.info("모의 매수는 로그인한 사용자 계정에만 저장됩니다. 왼쪽 메뉴에서 로그인해 주세요.")
             return
@@ -5303,6 +5318,18 @@ def load_dashboard_data_bundle(database_path: str, database_version: int):
     )
 
 
+def load_dashboard_data_for_session(database_path: str, database_version: int):
+    """같은 브라우저 세션의 메뉴 전환에서는 큰 DataFrame 복사를 건너뛴다."""
+    cache_key = (database_path, database_version)
+    if st.session_state.get("dashboard_data_bundle_key") != cache_key:
+        st.session_state["dashboard_data_bundle"] = load_dashboard_data_bundle(
+            database_path,
+            database_version,
+        )
+        st.session_state["dashboard_data_bundle_key"] = cache_key
+    return st.session_state["dashboard_data_bundle"]
+
+
 def main():
     if not is_auth_configured():
         st.error("Supabase 로그인 설정이 없어 대시보드를 열 수 없습니다.")
@@ -5322,6 +5349,7 @@ def main():
     # 집·회사·배포 환경 모두 Supabase의 검증된 전체 DB 스냅샷만 사용한다.
     # 중앙 연결 장애 때는 오래된 로컬 데이터를 표시하지 않고 시작을 중단한다.
 
+    database_version = _database_version()
     (
         all_score_df,
         snapshot_df,
@@ -5331,7 +5359,7 @@ def main():
         master_df,
         classification_df,
         theme_history_df,
-    ) = load_dashboard_data_bundle(DB_NAME, _database_version())
+    ) = load_dashboard_data_for_session(DB_NAME, database_version)
     history_df = all_score_df.copy()
 
     # 현재 추천 화면은 같은 DB 안의 최신 장중 스냅샷을 단일 기준으로 삼는다.
@@ -5454,7 +5482,16 @@ def main():
     is_master_account = is_admin_user(signed_in_user)
 
     def activate_sidebar_page(page):
+        current_page = st.session_state.get("active_dashboard_page", "홈")
+        if page != current_page:
+            st.session_state["previous_dashboard_page"] = current_page
         st.session_state["active_dashboard_page"] = page
+
+    def go_back_dashboard_page():
+        previous_page = st.session_state.pop("previous_dashboard_page", "홈")
+        current_page = st.session_state.get("active_dashboard_page", "홈")
+        st.session_state["active_dashboard_page"] = previous_page
+        st.session_state["previous_dashboard_page"] = current_page
 
     def sidebar_page_button(label, page, key):
         active = st.session_state["active_dashboard_page"] == page
@@ -5496,6 +5533,13 @@ def main():
         sidebar_page_button("DB 상태", "DB 상태", "nav_db")
 
     menu = st.session_state["active_dashboard_page"]
+
+    if menu != "홈":
+        st.button(
+            "← 뒤로",
+            key="dashboard_page_back",
+            on_click=go_back_dashboard_page,
+        )
 
     if menu == "수익률":
         st.header("수익 분석")
