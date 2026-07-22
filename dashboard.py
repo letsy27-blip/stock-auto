@@ -3517,32 +3517,6 @@ def show_prediction_performance_summary(show_details: bool = True):
                     "분석 매수 신호가 발생하면 진입하고, 분석 매도 신호가 발생하면 청산합니다. 목표가·손절가는 안전장치입니다."
                 )
 
-        with st.expander("결합전략 그림자 검증 · 보완 그림자전략 실제 일봉 한 달 워크포워드 백테스트", expanded=True):
-            st.warning(
-                "과거 실제 일봉을 날짜순으로 재생한 백테스트입니다. 당시의 완전한 뉴스·수급 스냅샷은 "
-                "4일치뿐이므로 가격 추세·거래량으로 매일 순위를 재산출한 결과이며 미래 수익을 보장하지 않습니다."
-            )
-            backtest_summary, backtest_trades = run_walk_forward_backtest(DB_PATH, trading_days=20)
-            if backtest_summary.empty:
-                st.info("백테스트에 필요한 일봉 데이터가 부족합니다.")
-            else:
-                view = backtest_summary.copy()
-                view["성공률(%)"] = view["성공률(%)"].map(lambda value: f"{value:.1f}%" if pd.notna(value) else "-")
-                view = view.rename(columns={"성공률(%)": "승률(%)"})
-                view["실현손익"] = view["실현손익"].map(lambda value: f"{value:+,.0f}원")
-                view["평가자산"] = view["평가자산"].map(lambda value: f"{value:,.0f}원")
-                view["누적수익률(%)"] = view["누적수익률(%)"].map(lambda value: f"{value:+.2f}%")
-                st.dataframe(view, use_container_width=True, hide_index=True)
-                if not backtest_trades.empty:
-                    with st.expander("백테스트 매매 내역"):
-                        trade_view = backtest_trades.copy()
-                        trade_view["수익률(%)"] = trade_view["수익률(%)"].map(lambda value: f"{value:+.2f}%")
-                        trade_view["실현손익"] = trade_view["실현손익"].map(lambda value: f"{value:+,.0f}원")
-                        st.dataframe(trade_view, use_container_width=True, hide_index=True)
-            st.caption(
-                "조건: 최근 20거래일 · 강화된 분석 신호 후 다음 거래일 시가 매수 · 지지선·변동성 기반 손절 · 저항선 목표 · 최소 손익비 1.5 · 거래당 계좌위험 최대 1% · "
-                "분석 매수·매도 신호 우선 · 순위 변동만으로는 청산하지 않음 · 목표가·손절가는 안전장치 · 수수료·매도세 반영"
-            )
     elif not top3_status.empty:
         actionable = top3_status[
             top3_status["상태"].isin(["매수 신호", "매도 신호"])
@@ -3597,6 +3571,37 @@ def show_prediction_performance_summary(show_details: bool = True):
                 "closed_at": "매도시각", "exit_reason": "매도이유",
             })
             st.dataframe(trade_view, use_container_width=True, hide_index=True)
+
+    if show_details:
+        st.divider()
+        st.markdown("### 과거 데이터 백테스트")
+        st.caption("현재 자동매매 상태가 아니라, 과거 일봉을 다시 재생해 전략을 시험한 별도 검증입니다.")
+        with st.expander("보완 그림자전략 · 실제 일봉 한 달 워크포워드 백테스트"):
+            st.warning(
+                "과거 실제 일봉을 날짜순으로 재생한 백테스트입니다. 당시의 완전한 뉴스·수급 스냅샷은 "
+                "4일치뿐이므로 가격 추세·거래량으로 매일 순위를 재산출한 결과이며 미래 수익을 보장하지 않습니다."
+            )
+            backtest_summary, backtest_trades = run_walk_forward_backtest(DB_PATH, trading_days=20)
+            if backtest_summary.empty:
+                st.info("백테스트에 필요한 일봉 데이터가 부족합니다.")
+            else:
+                view = backtest_summary.copy()
+                view["성공률(%)"] = view["성공률(%)"].map(lambda value: f"{value:.1f}%" if pd.notna(value) else "-")
+                view = view.rename(columns={"성공률(%)": "승률(%)"})
+                view["실현손익"] = view["실현손익"].map(lambda value: f"{value:+,.0f}원")
+                view["평가자산"] = view["평가자산"].map(lambda value: f"{value:,.0f}원")
+                view["누적수익률(%)"] = view["누적수익률(%)"].map(lambda value: f"{value:+.2f}%")
+                st.dataframe(view, use_container_width=True, hide_index=True)
+                if not backtest_trades.empty:
+                    with st.expander("백테스트 매매 내역"):
+                        trade_view = backtest_trades.copy()
+                        trade_view["수익률(%)"] = trade_view["수익률(%)"].map(lambda value: f"{value:+.2f}%")
+                        trade_view["실현손익"] = trade_view["실현손익"].map(lambda value: f"{value:+,.0f}원")
+                        st.dataframe(trade_view, use_container_width=True, hide_index=True)
+            st.caption(
+                "조건: 최근 20거래일 · 강화된 분석 신호 후 다음 거래일 시가 매수 · 지지선·변동성 기반 손절 · 저항선 목표 · 최소 손익비 1.5 · 거래당 계좌위험 최대 1% · "
+                "분석 매수·매도 신호 우선 · 순위 변동만으로는 청산하지 않음 · 목표가·손절가는 안전장치 · 수수료·매도세 반영"
+            )
 
 
 
