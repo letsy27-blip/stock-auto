@@ -3596,7 +3596,7 @@ def show_prediction_performance_summary(show_details: bool = True):
             "전체 보완전략의 과거 성과가 아니며, 현재 종목 기준에 따른 생존편향 가능성이 있습니다."
         )
         long_summary, regime_summary, long_trades, validation_meta = load_long_validation_cached(
-            str(DB_PATH), get_database_version()
+            str(DB_PATH), _database_version()
         )
         if long_summary.empty:
             st.info("장기 검증 데이터가 아직 준비되지 않았습니다.")
