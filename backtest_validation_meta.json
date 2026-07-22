@@ -1,0 +1,9 @@
+{
+  "price_start": "2021-01-04",
+  "price_end": "2026-07-22",
+  "stock_count": 287,
+  "trading_days": 1261,
+  "development_end": "2025-07-08",
+  "holdout_start": "2025-07-09",
+  "archive_used": true
+}

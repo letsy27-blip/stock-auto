@@ -49,7 +49,7 @@ from sector_theme_strength import (
     make_theme_strength,
 )
 from supabase_auth import is_admin_user, is_configured as is_auth_configured, show_auth_sidebar
-from strategy_backtest import run_walk_forward_backtest
+from strategy_backtest import run_long_horizon_validation
 
 
 # 다크 모드에서 캔버스형 dataframe을 HTML 표로 대체할 때 원본 함수를 보관한다.
@@ -3349,6 +3349,11 @@ def show_market_overview():
         for error in errors:
             st.warning(error)
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_long_validation_cached(database_path: str, database_version: int):
+    return run_long_horizon_validation(database_path, years=5, holdout_ratio=0.20)
+
+
 def show_prediction_performance_summary(show_details: bool = True):
     """TOP3·TOP30·사용자 모의투자의 실제 청산 성과를 비교한다."""
     if show_details:
@@ -3574,33 +3579,113 @@ def show_prediction_performance_summary(show_details: bool = True):
 
     if show_details:
         st.divider()
-        st.markdown("### 과거 데이터 백테스트")
-        st.caption("현재 자동매매 상태가 아니라, 과거 일봉을 다시 재생해 전략을 시험한 별도 검증입니다.")
-        with st.expander("보완 그림자전략 · 실제 일봉 한 달 워크포워드 백테스트"):
-            st.warning(
-                "과거 실제 일봉을 날짜순으로 재생한 백테스트입니다. 당시의 완전한 뉴스·수급 스냅샷은 "
-                "4일치뿐이므로 가격 추세·거래량으로 매일 순위를 재산출한 결과이며 미래 수익을 보장하지 않습니다."
-            )
-            backtest_summary, backtest_trades = run_walk_forward_backtest(DB_PATH, trading_days=20)
-            if backtest_summary.empty:
-                st.info("백테스트에 필요한 일봉 데이터가 부족합니다.")
-            else:
-                view = backtest_summary.copy()
-                view["성공률(%)"] = view["성공률(%)"].map(lambda value: f"{value:.1f}%" if pd.notna(value) else "-")
+        st.markdown("### 가격·거래량 전략 장기 검증")
+        st.warning(
+            "이 결과는 과거 뉴스·수급을 포함하지 않습니다. 현재 추적 종목의 가격·거래량만 사용하므로 "
+            "전체 보완전략의 과거 성과가 아니며, 현재 종목 기준에 따른 생존편향 가능성이 있습니다."
+        )
+        long_summary, regime_summary, long_trades, validation_meta = load_long_validation_cached(
+            str(DB_PATH), get_database_version()
+        )
+        if long_summary.empty:
+            st.info("장기 검증 데이터가 아직 준비되지 않았습니다.")
+        else:
+            coverage = st.columns(3)
+            coverage[0].metric("가격 데이터", f"{validation_meta.get('price_start')} ~ {validation_meta.get('price_end')}")
+            coverage[1].metric("검증 거래일", f"{int(validation_meta.get('trading_days', 0)):,}일")
+            coverage[2].metric("현재 추적 표본", f"{int(validation_meta.get('stock_count', 0)):,}종목")
+
+            def format_long_summary(frame: pd.DataFrame) -> pd.DataFrame:
+                view = frame.copy()
+                view["성공률(%)"] = view["성공률(%)"].map(
+                    lambda value: f"{value:.1f}%" if pd.notna(value) else "-"
+                )
                 view = view.rename(columns={"성공률(%)": "승률(%)"})
                 view["실현손익"] = view["실현손익"].map(lambda value: f"{value:+,.0f}원")
                 view["평가자산"] = view["평가자산"].map(lambda value: f"{value:,.0f}원")
                 view["누적수익률(%)"] = view["누적수익률(%)"].map(lambda value: f"{value:+.2f}%")
-                st.dataframe(view, use_container_width=True, hide_index=True)
-                if not backtest_trades.empty:
-                    with st.expander("백테스트 매매 내역"):
-                        trade_view = backtest_trades.copy()
-                        trade_view["수익률(%)"] = trade_view["수익률(%)"].map(lambda value: f"{value:+.2f}%")
-                        trade_view["실현손익"] = trade_view["실현손익"].map(lambda value: f"{value:+,.0f}원")
-                        st.dataframe(trade_view, use_container_width=True, hide_index=True)
+                return view
+
+            with st.expander("1. 5년 가격·거래량 전략 백테스트", expanded=True):
+                full_period = long_summary[long_summary["검증구간"] == "전체 기간"]
+                st.dataframe(format_long_summary(full_period), use_container_width=True, hide_index=True)
+                st.caption(
+                    "코스피 200일 이동평균과 기울기로 상승장·횡보장·하락장을 구분하고, "
+                    "다음 거래일 시가·수수료·매도세를 반영했습니다."
+                )
+
+            with st.expander("2. 보지 않은 기간 검증(OOS)", expanded=True):
+                split_periods = long_summary[long_summary["검증구간"] != "전체 기간"]
+                st.dataframe(format_long_summary(split_periods), use_container_width=True, hide_index=True)
+                st.caption(
+                    f"개발 참고 구간 종료 {validation_meta.get('development_end')} · "
+                    f"보지 않은 평가 구간 시작 {validation_meta.get('holdout_start')} · 마지막 20% 기간은 조건 조정에 사용하지 않습니다."
+                )
+
+            with st.expander("3. 상승장·횡보장·하락장별 결과", expanded=True):
+                regime_view = regime_summary.copy()
+                for column in ["승률(%)", "평균수익률(%)"]:
+                    regime_view[column] = regime_view[column].map(
+                        lambda value: f"{value:.2f}%" if pd.notna(value) else "-"
+                    )
+                regime_view["실현손익"] = regime_view["실현손익"].map(lambda value: f"{value:+,.0f}원")
+                regime_view["손익비율"] = regime_view["손익비율"].map(
+                    lambda value: f"{value:.2f}" if pd.notna(value) else "-"
+                )
+                st.dataframe(regime_view, use_container_width=True, hide_index=True)
+                st.caption("하락장·급락장에서는 신규 진입을 막도록 설계되어 청산거래가 0건일 수 있습니다.")
+
+            if not long_trades.empty:
+                with st.expander("장기 백테스트 최근 매매 500건"):
+                    trade_view = long_trades.tail(500).copy()
+                    trade_view["수익률(%)"] = trade_view["수익률(%)"].map(lambda value: f"{value:+.2f}%")
+                    trade_view["실현손익"] = trade_view["실현손익"].map(lambda value: f"{value:+,.0f}원")
+                    st.dataframe(trade_view, use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.markdown("### 실시간 전체 보완전략 그림자매매")
+        st.info(
+            "이 구역만 실제 서비스가 당시의 뉴스·수급·RSI·추격위험·시장상태를 함께 확인해 "
+            "날짜가 지나면서 쌓은 자동 가상매매 기록입니다. 위 장기 가격 백테스트와 직접 합산하지 않습니다."
+        )
+        st.dataframe(
+            format_performance_table(shadow_strategy_summary),
+            use_container_width=True,
+            hide_index=True,
+        )
+        if not long_summary.empty:
+            comparison_rows = []
+            oos_rows = long_summary[long_summary["검증구간"] == "보지 않은 기간(OOS)"]
+            for _, row in oos_rows.iterrows():
+                comparison_rows.append({
+                    "검증 방식": "가격·거래량 OOS",
+                    "전략": row["전략"],
+                    "기간": f"{row['시작일']} ~ {row['종료일']}",
+                    "포함 정보": "가격·거래량·코스피 국면",
+                    "청산거래": int(row["청산거래"]),
+                    "승률(%)": row["성공률(%)"],
+                    "수익률(%)": row["누적수익률(%)"],
+                })
+            for _, row in shadow_strategy_summary.iterrows():
+                comparison_rows.append({
+                    "검증 방식": "실시간 전체 그림자",
+                    "전략": labels.get(row["전략"], row["전략"]),
+                    "기간": period_label,
+                    "포함 정보": "가격·거래량·뉴스·수급·RSI·추격위험",
+                    "청산거래": int(row["청산거래"]),
+                    "승률(%)": row["성공률(%)"],
+                    "수익률(%)": row["기간수익률(%)"],
+                })
+            comparison = pd.DataFrame(comparison_rows)
+            comparison["승률(%)"] = comparison["승률(%)"].map(
+                lambda value: f"{value:.1f}%" if pd.notna(value) else "집계 대기"
+            )
+            comparison["수익률(%)"] = comparison["수익률(%)"].map(lambda value: f"{value:+.2f}%")
+            st.markdown("#### 가격 백테스트와 실시간 그림자 기록 비교")
+            st.dataframe(comparison, use_container_width=True, hide_index=True)
             st.caption(
-                "조건: 최근 20거래일 · 강화된 분석 신호 후 다음 거래일 시가 매수 · 지지선·변동성 기반 손절 · 저항선 목표 · 최소 손익비 1.5 · 거래당 계좌위험 최대 1% · "
-                "분석 매수·매도 신호 우선 · 순위 변동만으로는 청산하지 않음 · 목표가·손절가는 안전장치 · 수수료·매도세 반영"
+                "두 결과는 데이터와 기간이 다르므로 합산하거나 단순 순위 비교하지 않습니다. "
+                "실시간 그림자 기록이 충분히 쌓인 뒤 방향과 손실 폭이 비슷한지 확인합니다."
             )
 
 
