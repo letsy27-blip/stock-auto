@@ -5403,34 +5403,71 @@ def load_latest_scores_cached():
     return load_latest_scores()
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def load_dashboard_data_bundle(database_path: str, database_version: int):
-    """메뉴마다 반복하던 공통 테이블 정규화를 DB 버전별로 한 번만 수행한다."""
-    def read_table(table_name: str) -> pd.DataFrame:
-        return _load_table_cached(database_path, table_name, database_version)
+def load_dashboard_table_for_session(
+    database_path: str,
+    database_version: int,
+    table_name: str,
+) -> pd.DataFrame:
+    """현재 화면이 요구한 테이블 하나만 읽고 DB 버전이 바뀔 때까지 재사용한다."""
+    cache_version = (database_path, database_version)
+    if st.session_state.get("dashboard_table_cache_version") != cache_version:
+        st.session_state["dashboard_table_cache"] = {}
+        st.session_state["dashboard_table_cache_version"] = cache_version
 
-    return (
-        normalize_score_df(read_table("score")),
-        read_table("intraday_snapshot"),
-        read_table("chart_history"),
-        normalize_supply_df(read_table("supply_demand")),
-        normalize_news_df(read_table("news_history")),
-        normalize_master_df(read_table("stock_master")),
-        normalize_classification_df(read_table("stock_classification")),
-        normalize_theme_history_df(read_table("stock_theme_history")),
-    )
+    cache = st.session_state.setdefault("dashboard_table_cache", {})
+    if table_name not in cache:
+        frame = _load_table_cached(database_path, table_name, database_version)
+        normalizers = {
+            "score": normalize_score_df,
+            "supply_demand": normalize_supply_df,
+            "news_history": normalize_news_df,
+            "stock_master": normalize_master_df,
+            "stock_classification": normalize_classification_df,
+            "stock_theme_history": normalize_theme_history_df,
+        }
+        normalizer = normalizers.get(table_name)
+        cache[table_name] = normalizer(frame) if normalizer else frame
+    return cache[table_name]
 
 
-def load_dashboard_data_for_session(database_path: str, database_version: int):
-    """같은 브라우저 세션의 메뉴 전환에서는 큰 DataFrame 복사를 건너뛴다."""
-    cache_key = (database_path, database_version)
-    if st.session_state.get("dashboard_data_bundle_key") != cache_key:
-        st.session_state["dashboard_data_bundle"] = load_dashboard_data_bundle(
-            database_path,
-            database_version,
+def make_current_dashboard_scores(
+    history_df: pd.DataFrame | None = None,
+    snapshot_df: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, pd.Timestamp | None]:
+    """중앙 최신 순위를 우선 사용하고 필요한 화면에서만 과거 신호를 보충한다."""
+    history_df = history_df if history_df is not None else pd.DataFrame()
+    snapshot_df = snapshot_df if snapshot_df is not None else pd.DataFrame()
+    current_df = pd.DataFrame()
+    central_df, central_snapshot_at = load_latest_scores_cached()
+    if not central_df.empty:
+        current_df = normalize_score_df(central_df)
+        if central_snapshot_at is not None:
+            central_kst = central_snapshot_at.tz_convert("Asia/Seoul")
+            if "저장일자" not in current_df.columns or current_df["저장일자"].isna().all():
+                current_df["저장일자"] = central_kst.date()
+            current_df["저장시간"] = central_kst.strftime("%H:%M:%S")
+
+    if current_df.empty and not snapshot_df.empty and "스냅샷일시" in snapshot_df.columns:
+        snapshot_datetime = pd.to_datetime(snapshot_df["스냅샷일시"], errors="coerce")
+        latest_snapshot = snapshot_datetime.max()
+        if pd.notna(latest_snapshot):
+            current_df = normalize_score_df(
+                snapshot_df[snapshot_datetime == latest_snapshot].copy()
+            )
+
+    if current_df.empty and not history_df.empty:
+        update_datetime = pd.to_datetime(
+            history_df["저장일자"].astype(str)
+            + " "
+            + history_df["저장시간"].astype(str),
+            errors="coerce",
         )
-        st.session_state["dashboard_data_bundle_key"] = cache_key
-    return st.session_state["dashboard_data_bundle"]
+        latest_update = update_datetime.max()
+        current_df = history_df[update_datetime == latest_update].copy()
+
+    if not history_df.empty:
+        current_df = enrich_current_signals(current_df, history_df)
+    return current_df, central_snapshot_at
 
 
 def main():
@@ -5442,92 +5479,24 @@ def main():
         )
         st.stop()
 
-    st.title("HONG STOCK")
-    header_overview = load_market_overview_cached()
-    header_regime = classify_market_regime(
-        None if "error" in header_overview else header_overview
-    )
-    st.caption(market_regime_quote(header_regime["regime"]))
-
-    # 집·회사·배포 환경 모두 Supabase의 검증된 전체 DB 스냅샷만 사용한다.
-    # 중앙 연결 장애 때는 오래된 로컬 데이터를 표시하지 않고 시작을 중단한다.
-
-    database_version = _database_version()
-    (
-        all_score_df,
-        snapshot_df,
-        chart_df,
-        supply_df,
-        news_df,
-        master_df,
-        classification_df,
-        theme_history_df,
-    ) = load_dashboard_data_for_session(DB_NAME, database_version)
-    history_df = all_score_df.copy()
-
-    # 현재 추천 화면은 같은 DB 안의 최신 장중 스냅샷을 단일 기준으로 삼는다.
-    # score 테이블에는 재분석 시점별 묶음이 함께 쌓이므로 단순히 가장 늦게
-    # 저장된 묶음을 고르면 다른 PC에서 보던 장 마감 순위와 달라질 수 있다.
-    current_df = pd.DataFrame()
-    central_df, central_snapshot_at = load_latest_scores_cached()
-    if not central_df.empty:
-        current_df = normalize_score_df(central_df)
-        if central_snapshot_at is not None:
-            central_kst = central_snapshot_at.tz_convert("Asia/Seoul")
-            if "저장일자" not in current_df.columns or current_df["저장일자"].isna().all():
-                current_df["저장일자"] = central_kst.date()
-            current_df["저장시간"] = central_kst.strftime("%H:%M:%S")
-    if current_df.empty and not snapshot_df.empty and "스냅샷일시" in snapshot_df.columns:
-        snapshot_datetime = pd.to_datetime(
-            snapshot_df["스냅샷일시"], errors="coerce"
-        )
-        latest_snapshot = snapshot_datetime.max()
-        if pd.notna(latest_snapshot):
-            current_df = normalize_score_df(
-                snapshot_df[snapshot_datetime == latest_snapshot].copy()
-            )
-
-    # 장중 스냅샷이 아직 없는 초기 DB에서만 score의 최신 묶음을 사용한다.
-    if current_df.empty and not all_score_df.empty:
-        update_datetime = pd.to_datetime(
-            all_score_df["저장일자"].astype(str)
-            + " "
-            + all_score_df["저장시간"].astype(str),
-            errors="coerce",
-        )
-        latest_update = update_datetime.max()
-        current_df = all_score_df[update_datetime == latest_update].copy()
-
-    current_df = enrich_current_signals(current_df, all_score_df)
-
-    database_info = get_shared_database_info()
-    code_version = get_code_version()
-    central_updated_at = pd.to_datetime(
-        database_info.get("updated_at"), errors="coerce", utc=True
-    )
-    central_updated_text = (
-        central_updated_at.tz_convert("Asia/Seoul").strftime("%Y-%m-%d %H:%M:%S KST")
-        if pd.notna(central_updated_at) else "확인 불가"
-    )
-    latest_analysis_date = (
-        max(all_score_df["저장일자"].dropna())
-        if not all_score_df.empty
-        and "저장일자" in all_score_df.columns
-        and not all_score_df["저장일자"].dropna().empty
-        else "데이터 없음"
-    )
-    st.caption(
-        f"코드 {code_version} · 데이터 원본 Supabase 중앙 DB · "
-        f"중앙 DB 갱신 {central_updated_text} · 최신 분석일 {latest_analysis_date}"
-    )
-
     if "active_dashboard_page" not in st.session_state:
         st.session_state["active_dashboard_page"] = "홈"
     elif st.session_state["active_dashboard_page"] == "오늘 장 준비·시장 현황":
-        # 기존 화면을 열어 둔 사용자는 새 홈 메뉴로 자연스럽게 이동시킨다.
         st.session_state["active_dashboard_page"] = "홈"
     elif st.session_state["active_dashboard_page"] == "전략 성과":
         st.session_state["active_dashboard_page"] = "수익률"
+
+    st.title("HONG STOCK")
+    if st.session_state["active_dashboard_page"] == "홈":
+        header_overview = load_market_overview_cached()
+        header_regime = classify_market_regime(
+            None if "error" in header_overview else header_overview
+        )
+        st.caption(market_regime_quote(header_regime["regime"]))
+    else:
+        st.caption("필요한 화면 데이터만 불러와 빠르게 전환합니다.")
+
+    database_version = _database_version()
 
     st.session_state.setdefault("dashboard_back_stack", [])
     st.session_state.setdefault("dashboard_forward_stack", [])
@@ -5693,6 +5662,22 @@ def main():
 
     menu = st.session_state["active_dashboard_page"]
 
+    def table(table_name: str) -> pd.DataFrame:
+        return load_dashboard_table_for_session(DB_NAME, database_version, table_name)
+
+    database_info = get_shared_database_info()
+    central_updated_at = pd.to_datetime(
+        database_info.get("updated_at"), errors="coerce", utc=True
+    )
+    central_updated_text = (
+        central_updated_at.tz_convert("Asia/Seoul").strftime("%Y-%m-%d %H:%M:%S KST")
+        if pd.notna(central_updated_at) else "확인 불가"
+    )
+    st.caption(
+        f"코드 {get_code_version()} · 데이터 원본 Supabase 중앙 DB · "
+        f"중앙 DB 갱신 {central_updated_text} · 현재 화면 데이터만 지연 조회"
+    )
+
     if menu == "수익률":
         st.header("수익 분석")
         st.caption("TOP3·TOP30·모의투자의 실제 청산 수익률을 비교합니다.")
@@ -5709,12 +5694,18 @@ def main():
             st.header("내 모의투자")
             st.info("모의 계좌·주문·투자 성향은 로그인한 본인에게만 저장됩니다. 왼쪽 메뉴에서 로그인해 주세요.")
             return
-        show_paper_trading(
-            master_df=master_df,
-            current_df=current_df,
-            supply_df=supply_df,
-            section=menu,
+        master_df = table("stock_master") if menu == "모의 주문" else pd.DataFrame()
+        current_df = (
+            make_current_dashboard_scores()[0]
+            if menu == "모의 주문" else pd.DataFrame()
         )
+        supply_df = (
+            table("supply_demand")
+            if menu == "보유 종목"
+            and st.session_state.get("show_paper_profit_detail", False)
+            else pd.DataFrame()
+        )
+        show_paper_trading(master_df, current_df, supply_df, section=menu)
         return
 
     if menu == "DB 상태":
@@ -5725,38 +5716,51 @@ def main():
         return
 
     if menu == "홈":
+        history_df = table("score")
+        current_df, _ = make_current_dashboard_scores(
+            history_df,
+            table("intraday_snapshot"),
+        )
         show_market_home(
             current_df=current_df,
             history_df=history_df,
-            chart_df=chart_df,
-            master_df=master_df,
-            supply_df=supply_df,
-            news_df=news_df,
-            classification_df=classification_df,
-            theme_history_df=theme_history_df,
+            chart_df=table("chart_history"),
+            master_df=table("stock_master"),
+            supply_df=table("supply_demand"),
+            news_df=table("news_history"),
+            classification_df=table("stock_classification"),
+            theme_history_df=table("stock_theme_history"),
         )
         return
 
     if menu == "오늘 장 준비·실시간 추천":
+        history_df = table("score")
+        current_df, _ = make_current_dashboard_scores(
+            history_df,
+            table("intraday_snapshot"),
+        )
         show_today_preparation_and_recommendations(
             current_df=current_df,
             history_df=history_df,
-            chart_df=chart_df,
-            supply_df=supply_df,
-            news_df=news_df,
-            classification_df=classification_df,
-            theme_history_df=theme_history_df,
+            chart_df=table("chart_history"),
+            supply_df=table("supply_demand"),
+            news_df=table("news_history"),
+            classification_df=table("stock_classification"),
+            theme_history_df=table("stock_theme_history"),
         )
         return
 
     if menu == "업종·테마":
+        history_df = table("score")
+        current_df, _ = make_current_dashboard_scores(history_df)
         show_sector_strength(
             current_df=current_df,
-            classification_df=classification_df,
+            classification_df=table("stock_classification"),
         )
         return
 
     if menu == "추천 TOP30":
+        all_score_df = table("score")
         if all_score_df.empty:
             st.warning("추천점수 이력이 없습니다. 조회 결과: 0건")
             return
@@ -5775,11 +5779,11 @@ def main():
 
         show_today_top(
             score_df=display_df,
-            chart_df=chart_df,
-            supply_df=supply_df,
-            news_df=news_df,
-            classification_df=classification_df,
-            theme_history_df=theme_history_df,
+            chart_df=table("chart_history"),
+            supply_df=table("supply_demand"),
+            news_df=table("news_history"),
+            classification_df=table("stock_classification"),
+            theme_history_df=table("stock_theme_history"),
             selected_date=selected_date,
         )
         paper_buy_request = st.session_state.pop("top30_paper_buy_request", None)
@@ -5793,23 +5797,24 @@ def main():
         return
 
     if menu == "장중 흐름":
-        show_intraday_flow(snapshot_df)
+        show_intraday_flow(table("intraday_snapshot"))
         return
 
     if menu == "종목 검색":
+        history_df = table("score")
         show_stock_search(
             score_df=history_df,
-            chart_df=chart_df,
-            supply_df=supply_df,
-            news_df=news_df,
-            master_df=master_df,
-            classification_df=classification_df,
-            theme_history_df=theme_history_df,
+            chart_df=table("chart_history"),
+            supply_df=table("supply_demand"),
+            news_df=table("news_history"),
+            master_df=table("stock_master"),
+            classification_df=table("stock_classification"),
+            theme_history_df=table("stock_theme_history"),
         )
         return
 
     if menu == "과거 분석":
-        show_past_analysis(history_df)
+        show_past_analysis(table("score"))
         return
 
 
