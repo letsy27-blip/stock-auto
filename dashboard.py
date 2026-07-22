@@ -3,6 +3,7 @@ import re
 import json
 import html
 import sqlite3
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
@@ -2417,6 +2418,14 @@ def show_stock_detail_by_code(
 # -----------------------------
 # 팝업
 # -----------------------------
+def show_dialog_back_button(key: str, on_back=None) -> None:
+    """ESC 없이 닫을 수 있는 모바일 친화적인 팝업 뒤로 가기 버튼."""
+    if st.button("← 뒤로", key=key, use_container_width=True):
+        if on_back is not None:
+            on_back()
+        st.rerun()
+
+
 def make_stock_dialog(
     score_df: pd.DataFrame,
     chart_df: pd.DataFrame,
@@ -2430,6 +2439,10 @@ def make_stock_dialog(
 
     @st.dialog("종목 상세 분석", width="large", on_dismiss=close_stock_detail_dialog)
     def stock_detail_popup(stock_name: str, stock_code: str):
+        show_dialog_back_button(
+            f"stock_detail_back_{clean_code(stock_code)}",
+            on_back=close_stock_detail_dialog,
+        )
         show_stock_detail_by_code(
             score_df=score_df,
             chart_df=chart_df,
@@ -2478,6 +2491,7 @@ def make_quick_analysis_dialogs(
 
     @st.dialog("매매동향", width="large")
     def trading_popup(stock_name: str, stock_code: str):
+        show_dialog_back_button(f"trading_dialog_back_{clean_code(stock_code)}")
         st.subheader(f"{stock_name} ({clean_code(stock_code)})")
         latest_score = get_latest_score(stock_code)
 
@@ -2493,6 +2507,7 @@ def make_quick_analysis_dialogs(
 
     @st.dialog("뉴스 분석", width="large")
     def news_popup(stock_name: str, stock_code: str):
+        show_dialog_back_button(f"news_dialog_back_{clean_code(stock_code)}")
         st.subheader(f"{stock_name} ({clean_code(stock_code)})")
         latest_score = get_latest_score(stock_code)
 
@@ -2684,6 +2699,7 @@ def make_top30_paper_buy_dialog():
 
     @st.dialog("모의 매수 확인", width="small")
     def paper_buy_popup(stock_name: str, stock_code: str, fallback_price: float = 0.0):
+        show_dialog_back_button(f"paper_buy_dialog_back_{clean_code(stock_code)}")
         if is_remote_storage_enabled() and not is_paper_user_authenticated():
             st.info("모의 매수는 로그인한 사용자 계정에만 저장됩니다. 왼쪽 메뉴에서 로그인해 주세요.")
             return
@@ -2746,6 +2762,7 @@ def make_top30_paper_buy_dialog():
                     int(quantity),
                     execution_price,
                 )
+                invalidate_paper_state_cache()
                 st.session_state["top30_paper_order_confirmation"] = (
                     f"{stock_name} {int(quantity):,}주를 {execution_price:,.0f}원에 모의 매수했습니다. "
                     f"체결금액 {result['amount']:,.0f}원"
@@ -4660,6 +4677,28 @@ def show_investor_profile():
         st.dataframe(favorites, use_container_width=True, hide_index=True)
 
 
+def invalidate_paper_state_cache() -> None:
+    st.session_state.pop("paper_dashboard_state", None)
+    st.session_state.pop("paper_dashboard_state_loaded_at", None)
+
+
+def load_paper_state_for_session(max_age_seconds: float = 5.0):
+    """자동 새로고침 중 동일한 Supabase 계좌 조회를 매번 반복하지 않는다."""
+    now = time.monotonic()
+    loaded_at = float(st.session_state.get("paper_dashboard_state_loaded_at", 0.0))
+    cached = st.session_state.get("paper_dashboard_state")
+    if cached is None or now - loaded_at >= max_age_seconds:
+        cached = (
+            get_paper_account(),
+            get_paper_positions(),
+            get_paper_orders(limit=10000),
+        )
+        st.session_state["paper_dashboard_state"] = cached
+        st.session_state["paper_dashboard_state_loaded_at"] = now
+    account, positions, orders = cached
+    return dict(account), positions.copy(deep=True), orders.copy(deep=True)
+
+
 def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"):
     st.header("모의투자")
     st.caption("실제 주문은 전송되지 않습니다. 초기 자금 1억 원, 매수·매도 수수료와 매도세가 반영됩니다.")
@@ -4675,8 +4714,8 @@ def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"
     # 초단위 갱신은 평가손익이 필요한 보유 종목 화면에서만 사용한다.
     needs_realtime_refresh = section == "보유 종목"
     if needs_realtime_refresh and not profit_detail_open:
-        st_autorefresh(interval=1000, key="paper_trading_realtime_refresh")
-        st.caption("장이 열려 있을 때 보유 종목과 수익률을 1초마다 갱신합니다.")
+        st_autorefresh(interval=3000, key="paper_trading_realtime_refresh")
+        st.caption("장이 열려 있을 때 보유 종목과 수익률을 3초마다 갱신합니다.")
     elif needs_realtime_refresh:
         st.caption("손익 분석을 보는 동안 실시간 갱신이 잠시 멈춥니다.")
 
@@ -4686,9 +4725,15 @@ def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"
     def close_profit_detail():
         st.session_state["show_paper_profit_detail"] = False
 
-    account = get_paper_account()
-    positions = get_paper_positions()
-    paper_orders = get_paper_orders(limit=10000)
+    try:
+        account, positions, paper_orders = load_paper_state_for_session()
+    except Exception as exc:
+        st.error("보유 종목을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+        st.caption(f"중앙 모의투자 DB 응답: {exc}")
+        if st.button("다시 불러오기", key="paper_state_retry", use_container_width=True):
+            invalidate_paper_state_cache()
+            st.rerun()
+        return
     previous_price_map = st.session_state.get("paper_previous_prices", {})
     price_map = {}
     if not positions.empty and needs_live_price:
@@ -5178,6 +5223,7 @@ def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"
                     quantity,
                     execution_price,
                 )
+                invalidate_paper_state_cache()
                 side_label = "매수" if side == "BUY" else "매도"
                 st.session_state["paper_order_confirmation"] = (
                     f"{name} {quantity:,}주 {side_label}가 현재가 "
@@ -5228,6 +5274,7 @@ def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"
     with st.expander("모의계좌 초기화"):
         if st.button("초기 자금 1억 원으로 초기화"):
             reset_paper_account()
+            invalidate_paper_state_cache()
             st.success("모의계좌를 초기화했습니다.")
             st.rerun()
 
@@ -5303,6 +5350,18 @@ def load_dashboard_data_bundle(database_path: str, database_version: int):
     )
 
 
+def load_dashboard_data_for_session(database_path: str, database_version: int):
+    """같은 브라우저 세션의 메뉴 전환에서는 큰 DataFrame 복사를 건너뛴다."""
+    cache_key = (database_path, database_version)
+    if st.session_state.get("dashboard_data_bundle_key") != cache_key:
+        st.session_state["dashboard_data_bundle"] = load_dashboard_data_bundle(
+            database_path,
+            database_version,
+        )
+        st.session_state["dashboard_data_bundle_key"] = cache_key
+    return st.session_state["dashboard_data_bundle"]
+
+
 def main():
     if not is_auth_configured():
         st.error("Supabase 로그인 설정이 없어 대시보드를 열 수 없습니다.")
@@ -5322,6 +5381,7 @@ def main():
     # 집·회사·배포 환경 모두 Supabase의 검증된 전체 DB 스냅샷만 사용한다.
     # 중앙 연결 장애 때는 오래된 로컬 데이터를 표시하지 않고 시작을 중단한다.
 
+    database_version = _database_version()
     (
         all_score_df,
         snapshot_df,
@@ -5331,7 +5391,7 @@ def main():
         master_df,
         classification_df,
         theme_history_df,
-    ) = load_dashboard_data_bundle(DB_NAME, _database_version())
+    ) = load_dashboard_data_for_session(DB_NAME, database_version)
     history_df = all_score_df.copy()
 
     # 현재 추천 화면은 같은 DB 안의 최신 장중 스냅샷을 단일 기준으로 삼는다.
@@ -5454,7 +5514,16 @@ def main():
     is_master_account = is_admin_user(signed_in_user)
 
     def activate_sidebar_page(page):
+        current_page = st.session_state.get("active_dashboard_page", "홈")
+        if page != current_page:
+            st.session_state["previous_dashboard_page"] = current_page
         st.session_state["active_dashboard_page"] = page
+
+    def go_back_dashboard_page():
+        previous_page = st.session_state.pop("previous_dashboard_page", "홈")
+        current_page = st.session_state.get("active_dashboard_page", "홈")
+        st.session_state["active_dashboard_page"] = previous_page
+        st.session_state["previous_dashboard_page"] = current_page
 
     def sidebar_page_button(label, page, key):
         active = st.session_state["active_dashboard_page"] == page
@@ -5496,6 +5565,13 @@ def main():
         sidebar_page_button("DB 상태", "DB 상태", "nav_db")
 
     menu = st.session_state["active_dashboard_page"]
+
+    if menu != "홈":
+        st.button(
+            "← 뒤로",
+            key="dashboard_page_back",
+            on_click=go_back_dashboard_page,
+        )
 
     if menu == "수익률":
         st.header("수익 분석")
