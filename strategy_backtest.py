@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +15,12 @@ BUY_FEE = 0.00015
 SELL_FEE = 0.00015
 SELL_TAX = 0.0018
 RISK_PER_TRADE = 0.01
+PRICE_ARCHIVE = Path(__file__).with_name("backtest_price_history.csv.gz")
+MARKET_ARCHIVE = Path(__file__).with_name("backtest_market_index.csv.gz")
+VALIDATION_SUMMARY = Path(__file__).with_name("backtest_validation_summary.csv")
+REGIME_SUMMARY = Path(__file__).with_name("backtest_regime_summary.csv")
+VALIDATION_TRADES = Path(__file__).with_name("backtest_validation_trades.csv.gz")
+VALIDATION_META = Path(__file__).with_name("backtest_validation_meta.json")
 
 
 @dataclass
@@ -26,14 +33,18 @@ class Position:
     opened_at: pd.Timestamp
     target: float
     stop: float
+    regime: str
 
 
 def _load_prices(db_path: str | Path) -> pd.DataFrame:
-    with sqlite3.connect(db_path) as connection:
-        frame = pd.read_sql_query(
-            'SELECT "종목코드", "종목명", "날짜", "시가", "고가", "저가", "종가", "거래량" '
-            'FROM chart_history', connection,
-        )
+    if PRICE_ARCHIVE.exists():
+        frame = pd.read_csv(PRICE_ARCHIVE, dtype={"종목코드": str})
+    else:
+        with sqlite3.connect(db_path) as connection:
+            frame = pd.read_sql_query(
+                'SELECT "종목코드", "종목명", "날짜", "시가", "고가", "저가", "종가", "거래량" '
+                'FROM chart_history', connection,
+            )
     if frame.empty:
         return frame
     frame["날짜"] = pd.to_datetime(frame["날짜"], errors="coerce")
@@ -44,6 +55,27 @@ def _load_prices(db_path: str | Path) -> pd.DataFrame:
         .sort_values(["종목코드", "날짜"])
         .drop_duplicates(["종목코드", "날짜"], keep="last")
     )
+
+
+def _load_market_regimes() -> pd.DataFrame:
+    if not MARKET_ARCHIVE.exists():
+        return pd.DataFrame()
+    market = pd.read_csv(MARKET_ARCHIVE)
+    market["날짜"] = pd.to_datetime(market["날짜"], errors="coerce")
+    market["종가"] = pd.to_numeric(market["종가"], errors="coerce")
+    market = market.dropna().sort_values("날짜")
+    market["MA200"] = market["종가"].rolling(200).mean()
+    market["MA200기울기"] = market["MA200"].pct_change(20)
+    market["20일수익률"] = market["종가"].pct_change(20)
+    market["시장국면"] = "횡보장"
+    market.loc[
+        (market["종가"] > market["MA200"]) & (market["MA200기울기"] > 0), "시장국면"
+    ] = "상승장"
+    market.loc[
+        (market["종가"] < market["MA200"]) & (market["MA200기울기"] < 0), "시장국면"
+    ] = "하락장"
+    market.loc[market["20일수익률"] <= -0.12, "시장국면"] = "급락장"
+    return market[["날짜", "시장국면"]]
 
 
 def _make_signals(prices: pd.DataFrame) -> pd.DataFrame:
@@ -107,18 +139,23 @@ def _make_signals(prices: pd.DataFrame) -> pd.DataFrame:
         (prices["종가"] < prices["MA5"])
         & (prices["MA5"] < prices["MA20"])
     )
-    prices["시장상승비율"] = prices.groupby("날짜")["추세점수"].transform("mean") / 100
-    prices["시장중앙5일수익률"] = prices.groupby("날짜")["수익률5"].transform("median")
-    crash = (prices["시장상승비율"] < 0.20) | (prices["시장중앙5일수익률"] <= -0.05)
-    bear = (prices["시장상승비율"] < 0.40) & (prices["시장중앙5일수익률"] < 0)
-    bull = (prices["시장상승비율"] >= 0.55) & (prices["시장중앙5일수익률"] > 0)
-    prices["시장국면"] = "횡보장"
-    prices.loc[bull, "시장국면"] = "상승장"
-    prices.loc[bear, "시장국면"] = "하락장"
-    prices.loc[crash, "시장국면"] = "급락장"
+    market_regimes = _load_market_regimes()
+    if not market_regimes.empty:
+        prices = prices.merge(market_regimes, on="날짜", how="left")
+        prices["시장국면"] = prices["시장국면"].fillna("판단불가")
+    else:
+        prices["시장상승비율"] = prices.groupby("날짜")["추세점수"].transform("mean") / 100
+        prices["시장중앙5일수익률"] = prices.groupby("날짜")["수익률5"].transform("median")
+        crash = (prices["시장상승비율"] < 0.20) | (prices["시장중앙5일수익률"] <= -0.05)
+        bear = (prices["시장상승비율"] < 0.40) & (prices["시장중앙5일수익률"] < 0)
+        bull = (prices["시장상승비율"] >= 0.55) & (prices["시장중앙5일수익률"] > 0)
+        prices["시장국면"] = "횡보장"
+        prices.loc[bull, "시장국면"] = "상승장"
+        prices.loc[bear, "시장국면"] = "하락장"
+        prices.loc[crash, "시장국면"] = "급락장"
     prices["시장투자비중"] = prices["시장국면"].map(
-        {"상승장": 1.0, "횡보장": 0.5, "하락장": 0.0, "급락장": 0.0}
-    )
+        {"상승장": 1.0, "횡보장": 0.5, "하락장": 0.0, "급락장": 0.0, "판단불가": 0.0}
+    ).fillna(0.0)
     prices["매수신호"] &= prices["시장투자비중"] > 0
     return prices.dropna(subset=["백테스트점수", "시가", "고가", "저가"])
 
@@ -179,7 +216,8 @@ def _run_strategy(signals: pd.DataFrame, capacity: int, trading_dates: list[pd.T
             cash += gross - exit_fee - tax
             trades.append({"종목코드": code, "종목명": position.name, "매수일": position.opened_at,
                            "매도일": trade_day, "매수가": position.entry, "매도가": exit_price,
-                           "수익률(%)": profit / cost * 100, "실현손익": profit, "청산사유": reason})
+                           "수익률(%)": profit / cost * 100, "실현손익": profit,
+                           "진입시장국면": position.regime, "청산사유": reason})
             del positions[code]
             closed_today.add(code)
 
@@ -216,7 +254,8 @@ def _run_strategy(signals: pd.DataFrame, capacity: int, trading_dates: list[pd.T
             fee = entry * quantity * BUY_FEE
             cash -= entry * quantity + fee
             positions[code] = Position(
-                code, str(candidate["종목명"]), quantity, entry, fee, trade_day, target, stop
+                code, str(candidate["종목명"]), quantity, entry, fee, trade_day, target, stop,
+                str(candidate["시장국면"]),
             )
             slots -= 1
 
@@ -260,3 +299,99 @@ def run_walk_forward_backtest(db_path: str | Path, trading_days: int = 20) -> tu
             trades.insert(0, "전략", name)
             all_trades.append(trades)
     return pd.DataFrame(summaries), pd.concat(all_trades, ignore_index=True) if all_trades else pd.DataFrame()
+
+
+def run_long_horizon_validation(
+    db_path: str | Path,
+    years: int = 5,
+    holdout_ratio: float = 0.20,
+    prefer_precomputed: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
+    """Return period-split summaries, regime results, trades, and data-coverage metadata."""
+    if prefer_precomputed and all(
+        path.exists() for path in [VALIDATION_SUMMARY, REGIME_SUMMARY, VALIDATION_TRADES, VALIDATION_META]
+    ):
+        summary = pd.read_csv(VALIDATION_SUMMARY)
+        regimes = pd.read_csv(REGIME_SUMMARY)
+        trades = pd.read_csv(VALIDATION_TRADES)
+        metadata = json.loads(VALIDATION_META.read_text(encoding="utf-8"))
+        return summary, regimes, trades, metadata
+    raw_prices = _load_prices(db_path)
+    if raw_prices.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
+    signals = _make_signals(raw_prices)
+    all_dates = [pd.Timestamp(value) for value in sorted(signals["날짜"].dropna().unique())]
+    requested_days = years * 252 + 1
+    dates = all_dates[-requested_days:] if len(all_dates) > requested_days else all_dates
+    if len(dates) < 60:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
+
+    split_index = max(2, min(len(dates) - 2, int(len(dates) * (1 - holdout_ratio))))
+    development_dates = dates[:split_index]
+    holdout_dates = dates[split_index - 1:]
+    summaries: list[dict] = []
+    full_trades: list[pd.DataFrame] = []
+
+    for name, capacity in [("TOP3", 3), ("TOP30", 30)]:
+        for label, period_dates, display_start in [
+            ("개발 참고 구간", development_dates, development_dates[0]),
+            ("보지 않은 기간(OOS)", holdout_dates, holdout_dates[1]),
+            ("전체 기간", dates, dates[0]),
+        ]:
+            result = _run_strategy(signals, capacity, period_dates)
+            trades = result.pop("trades")
+            result.update({
+                "전략": name,
+                "검증구간": label,
+                "시작일": display_start.date(),
+                "종료일": period_dates[-1].date(),
+            })
+            summaries.append(result)
+            if label == "전체 기간" and not trades.empty:
+                trades.insert(0, "전략", name)
+                full_trades.append(trades)
+
+    trade_frame = pd.concat(full_trades, ignore_index=True) if full_trades else pd.DataFrame()
+    regime_days = (
+        signals[signals["날짜"].isin(dates)][["날짜", "시장국면"]]
+        .drop_duplicates()
+        .groupby("시장국면")["날짜"]
+        .nunique()
+        .to_dict()
+    )
+    regime_rows: list[dict] = []
+    for strategy in ["TOP3", "TOP30"]:
+        strategy_trades = (
+            trade_frame[trade_frame["전략"] == strategy]
+            if not trade_frame.empty else pd.DataFrame()
+        )
+        for regime in ["상승장", "횡보장", "하락장", "급락장"]:
+            subset = (
+                strategy_trades[strategy_trades["진입시장국면"] == regime]
+                if not strategy_trades.empty else pd.DataFrame()
+            )
+            profits = pd.to_numeric(subset.get("실현손익"), errors="coerce").dropna() if not subset.empty else pd.Series(dtype=float)
+            returns = pd.to_numeric(subset.get("수익률(%)"), errors="coerce").dropna() if not subset.empty else pd.Series(dtype=float)
+            positive = float(profits[profits > 0].sum())
+            negative = abs(float(profits[profits < 0].sum()))
+            regime_rows.append({
+                "전략": strategy,
+                "시장국면": regime,
+                "거래일": int(regime_days.get(regime, 0)),
+                "청산거래": len(subset),
+                "승률(%)": float((profits > 0).mean() * 100) if len(profits) else None,
+                "평균수익률(%)": float(returns.mean()) if len(returns) else None,
+                "실현손익": float(profits.sum()) if len(profits) else 0.0,
+                "손익비율": positive / negative if negative > 0 else None,
+            })
+
+    metadata = {
+        "price_start": raw_prices["날짜"].min().date(),
+        "price_end": raw_prices["날짜"].max().date(),
+        "stock_count": int(raw_prices["종목코드"].nunique()),
+        "trading_days": len(dates),
+        "development_end": development_dates[-1].date(),
+        "holdout_start": holdout_dates[1].date(),
+        "archive_used": PRICE_ARCHIVE.exists(),
+    }
+    return pd.DataFrame(summaries), pd.DataFrame(regime_rows), trade_frame, metadata
