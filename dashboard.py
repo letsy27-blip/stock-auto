@@ -508,6 +508,16 @@ def apply_display_theme(theme: str) -> None:
             background: #263B55 !important;
             color: #FFFFFF !important;
         }
+        [class*="st-key-history_"] button {
+            background: #202833 !important;
+            border-color: #4B5563 !important;
+            color: #E5E7EB !important;
+        }
+        [class*="st-key-history_"] button:hover:not(:disabled) {
+            background: #263B55 !important;
+            border-color: #60A5FA !important;
+            color: #FFFFFF !important;
+        }
         [data-testid="stAppViewContainer"] h1,
         [data-testid="stAppViewContainer"] h2,
         [data-testid="stAppViewContainer"] h3,
@@ -4725,10 +4735,15 @@ def show_investor_profile():
 def invalidate_paper_state_cache() -> None:
     st.session_state.pop("paper_dashboard_state", None)
     st.session_state.pop("paper_dashboard_state_loaded_at", None)
+    st.session_state.pop("paper_dashboard_orders", None)
+    st.session_state.pop("paper_dashboard_orders_loaded_at", None)
 
 
-def load_paper_state_for_session(max_age_seconds: float = 5.0):
-    """자동 새로고침 중 동일한 Supabase 계좌 조회를 매번 반복하지 않는다."""
+def load_paper_state_for_session(
+    include_orders: bool = False,
+    max_age_seconds: float = 15.0,
+):
+    """보유 화면은 가벼운 계좌·보유 조회만 하고 거래내역은 필요할 때 읽는다."""
     now = time.monotonic()
     loaded_at = float(st.session_state.get("paper_dashboard_state_loaded_at", 0.0))
     cached = st.session_state.get("paper_dashboard_state")
@@ -4736,11 +4751,20 @@ def load_paper_state_for_session(max_age_seconds: float = 5.0):
         cached = (
             get_paper_account(),
             get_paper_positions(),
-            get_paper_orders(limit=10000),
         )
         st.session_state["paper_dashboard_state"] = cached
         st.session_state["paper_dashboard_state_loaded_at"] = now
-    account, positions, orders = cached
+    account, positions = cached
+    orders = pd.DataFrame()
+    if include_orders:
+        orders_loaded_at = float(
+            st.session_state.get("paper_dashboard_orders_loaded_at", 0.0)
+        )
+        orders = st.session_state.get("paper_dashboard_orders")
+        if orders is None or now - orders_loaded_at >= max_age_seconds:
+            orders = get_paper_orders(limit=10000)
+            st.session_state["paper_dashboard_orders"] = orders
+            st.session_state["paper_dashboard_orders_loaded_at"] = now
     return dict(account), positions.copy(deep=True), orders.copy(deep=True)
 
 
@@ -4771,7 +4795,9 @@ def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"
         st.session_state["show_paper_profit_detail"] = False
 
     try:
-        account, positions, paper_orders = load_paper_state_for_session()
+        account, positions, paper_orders = load_paper_state_for_session(
+            include_orders=section == "거래 내역" or profit_detail_open,
+        )
     except Exception as exc:
         st.error("보유 종목을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
         st.caption(f"중앙 모의투자 DB 응답: {exc}")
@@ -5503,6 +5529,65 @@ def main():
     elif st.session_state["active_dashboard_page"] == "전략 성과":
         st.session_state["active_dashboard_page"] = "수익률"
 
+    st.session_state.setdefault("dashboard_back_stack", [])
+    st.session_state.setdefault("dashboard_forward_stack", [])
+
+    def activate_sidebar_page(page):
+        current_page = st.session_state.get("active_dashboard_page", "홈")
+        if page == current_page:
+            return
+        back_stack = list(st.session_state.get("dashboard_back_stack", []))
+        back_stack.append(current_page)
+        st.session_state["dashboard_back_stack"] = back_stack[-30:]
+        st.session_state["dashboard_forward_stack"] = []
+        st.session_state["active_dashboard_page"] = page
+
+    def go_back_dashboard_page():
+        back_stack = list(st.session_state.get("dashboard_back_stack", []))
+        if not back_stack:
+            return
+        current_page = st.session_state.get("active_dashboard_page", "홈")
+        forward_stack = list(st.session_state.get("dashboard_forward_stack", []))
+        st.session_state["active_dashboard_page"] = back_stack.pop()
+        forward_stack.append(current_page)
+        st.session_state["dashboard_back_stack"] = back_stack
+        st.session_state["dashboard_forward_stack"] = forward_stack[-30:]
+
+    def go_forward_dashboard_page():
+        forward_stack = list(st.session_state.get("dashboard_forward_stack", []))
+        if not forward_stack:
+            return
+        current_page = st.session_state.get("active_dashboard_page", "홈")
+        back_stack = list(st.session_state.get("dashboard_back_stack", []))
+        st.session_state["active_dashboard_page"] = forward_stack.pop()
+        back_stack.append(current_page)
+        st.session_state["dashboard_back_stack"] = back_stack[-30:]
+        st.session_state["dashboard_forward_stack"] = forward_stack
+
+    history_cols = st.sidebar.columns(3)
+    history_cols[0].button(
+        "← 뒤로",
+        key="history_back",
+        use_container_width=True,
+        disabled=not st.session_state["dashboard_back_stack"],
+        on_click=go_back_dashboard_page,
+    )
+    history_cols[1].button(
+        "홈",
+        key="history_home",
+        use_container_width=True,
+        disabled=st.session_state["active_dashboard_page"] == "홈",
+        on_click=activate_sidebar_page,
+        args=("홈",),
+    )
+    history_cols[2].button(
+        "앞으로 →",
+        key="history_forward",
+        use_container_width=True,
+        disabled=not st.session_state["dashboard_forward_stack"],
+        on_click=go_forward_dashboard_page,
+    )
+
     selected_theme = st.sidebar.radio(
         "화면 테마",
         ["화이트", "다크"],
@@ -5550,6 +5635,18 @@ def main():
             color: #2563eb;
             border: 0 !important;
         }
+        [class*="st-key-history_"] button {
+            min-height: 34px !important;
+            padding: 3px 4px !important;
+            justify-content: center !important;
+            text-align: center !important;
+            border: 1px solid #CBD5E1 !important;
+            font-size: 0.78rem !important;
+            font-weight: 600 !important;
+        }
+        [class*="st-key-history_"] button:disabled {
+            opacity: 0.38 !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -5557,18 +5654,6 @@ def main():
     apply_display_theme(selected_theme)
     signed_in_user = show_auth_sidebar()
     is_master_account = is_admin_user(signed_in_user)
-
-    def activate_sidebar_page(page):
-        current_page = st.session_state.get("active_dashboard_page", "홈")
-        if page != current_page:
-            st.session_state["previous_dashboard_page"] = current_page
-        st.session_state["active_dashboard_page"] = page
-
-    def go_back_dashboard_page():
-        previous_page = st.session_state.pop("previous_dashboard_page", "홈")
-        current_page = st.session_state.get("active_dashboard_page", "홈")
-        st.session_state["active_dashboard_page"] = previous_page
-        st.session_state["previous_dashboard_page"] = current_page
 
     def sidebar_page_button(label, page, key):
         active = st.session_state["active_dashboard_page"] == page
@@ -5580,9 +5665,6 @@ def main():
             on_click=activate_sidebar_page,
             args=(page,),
         )
-
-    st.sidebar.markdown("## 🏠 홈")
-    sidebar_page_button("홈", "홈", "nav_home")
 
     st.sidebar.markdown("## 🗓️ 오늘의 투자")
     sidebar_page_button(
@@ -5610,13 +5692,6 @@ def main():
         sidebar_page_button("DB 상태", "DB 상태", "nav_db")
 
     menu = st.session_state["active_dashboard_page"]
-
-    if menu != "홈":
-        st.button(
-            "← 뒤로",
-            key="dashboard_page_back",
-            on_click=go_back_dashboard_page,
-        )
 
     if menu == "수익률":
         st.header("수익 분석")
