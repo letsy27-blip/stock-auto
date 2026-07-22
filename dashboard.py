@@ -1768,8 +1768,9 @@ def get_stock_chart_df(chart_df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     stock_df["날짜"] = pd.to_datetime(stock_df["날짜"], errors="coerce")
-    stock_df["종가"] = pd.to_numeric(stock_df.get("종가"), errors="coerce")
-    stock_df["거래량"] = pd.to_numeric(stock_df.get("거래량"), errors="coerce")
+    for column in ["시가", "고가", "저가", "종가", "거래량"]:
+        if column in stock_df.columns:
+            stock_df[column] = pd.to_numeric(stock_df[column], errors="coerce")
     stock_df = stock_df.dropna(subset=["날짜"]).sort_values("날짜")
     return stock_df
 
@@ -1785,41 +1786,85 @@ def show_price_volume_charts(chart_df: pd.DataFrame, stock_name: str, stock_code
         st.warning("종가 데이터가 없어 차트를 표시할 수 없습니다.")
         return
 
-    st.subheader("종가 차트")
-    interval = st.radio(
-        "차트 기준",
+    required_ohlc = {"시가", "고가", "저가", "종가"}
+    if not required_ohlc.issubset(stock_chart_df.columns):
+        st.warning("시가·고가·저가·종가 데이터가 부족해 봉차트를 표시할 수 없습니다.")
+        return
+
+    st.subheader("봉차트")
+    control_cols = st.columns([1, 1])
+    interval = control_cols[0].radio(
+        "봉 기준",
         ["일봉", "월봉", "연봉"],
         horizontal=True,
         key=f"chart_interval_{clean_code(stock_code)}",
     )
-    chart_data = stock_chart_df[["날짜", "종가", "거래량"]].copy()
-    chart_data = chart_data.dropna(subset=["날짜", "종가"]).sort_values("날짜")
+    visible_period = control_cols[1].selectbox(
+        "조회 기간 · Y축 자동 맞춤",
+        ["1개월", "3개월", "6개월", "1년", "3년", "전체"],
+        index=3,
+        key=f"chart_period_{clean_code(stock_code)}",
+    )
+    chart_data = stock_chart_df[
+        ["날짜", "시가", "고가", "저가", "종가", "거래량"]
+    ].copy()
+    chart_data = chart_data.dropna(subset=["날짜", "시가", "고가", "저가", "종가"]).sort_values("날짜")
 
     if interval == "월봉":
         chart_data = (
             chart_data.set_index("날짜")
             .resample("ME")
-            .agg({"종가": "last", "거래량": "sum"})
-            .dropna(subset=["종가"])
+            .agg({"시가": "first", "고가": "max", "저가": "min", "종가": "last", "거래량": "sum"})
+            .dropna(subset=["시가", "고가", "저가", "종가"])
             .reset_index()
         )
     elif interval == "연봉":
         chart_data = (
             chart_data.set_index("날짜")
             .resample("YE")
-            .agg({"종가": "last", "거래량": "sum"})
-            .dropna(subset=["종가"])
+            .agg({"시가": "first", "고가": "max", "저가": "min", "종가": "last", "거래량": "sum"})
+            .dropna(subset=["시가", "고가", "저가", "종가"])
             .reset_index()
         )
 
-    fig_price = px.line(
-        chart_data,
-        x="날짜",
-        y="종가",
-        markers=True,
-        title=f"{stock_name} {interval} 종가 추이",
+    period_days = {"1개월": 31, "3개월": 93, "6개월": 186, "1년": 366, "3년": 1096}
+    if visible_period != "전체" and not chart_data.empty:
+        cutoff = chart_data["날짜"].max() - pd.Timedelta(days=period_days[visible_period])
+        chart_data = chart_data[chart_data["날짜"] >= cutoff].copy()
+
+    low = float(chart_data["저가"].min())
+    high = float(chart_data["고가"].max())
+    padding = max((high - low) * 0.06, high * 0.005)
+    fig_price = go.Figure(
+        data=[
+            go.Candlestick(
+                x=chart_data["날짜"],
+                open=chart_data["시가"],
+                high=chart_data["고가"],
+                low=chart_data["저가"],
+                close=chart_data["종가"],
+                increasing_line_color="#ef4444",
+                decreasing_line_color="#2563eb",
+                increasing_fillcolor="#ef4444",
+                decreasing_fillcolor="#2563eb",
+                name=interval,
+            )
+        ]
     )
-    show_theme_aware_plotly_chart(fig_price, use_container_width=True)
+    fig_price.update_layout(
+        title=f"{stock_name} {interval} · {visible_period}",
+        xaxis_rangeslider_visible=False,
+        yaxis_title="가격(원)",
+        yaxis_range=[max(0, low - padding), high + padding],
+        dragmode="zoom",
+        hovermode="x unified",
+    )
+    st.caption("조회 기간을 바꾸면 해당 구간의 최저가·최고가에 맞춰 Y축이 자동 조정됩니다. 차트 더블클릭으로 축을 초기화할 수 있습니다.")
+    show_theme_aware_plotly_chart(
+        fig_price,
+        use_container_width=True,
+        config={"displaylogo": False, "scrollZoom": True, "doubleClick": "reset"},
+    )
 
     if chart_data["거래량"].notna().any():
         fig_volume = px.bar(
