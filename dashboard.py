@@ -2749,59 +2749,96 @@ def make_trading_trend_text(
 # -----------------------------
 
 
-def make_top30_paper_buy_dialog():
-    """TOP30 화면에서 바로 사용할 수 있는 모의 매수 확인창을 만든다."""
+def make_paper_trade_dialog():
+    """추천·검색 화면에서 함께 사용하는 안전한 모의 매매 확인창."""
 
-    @st.dialog("모의 매수 확인", width="small")
-    def paper_buy_popup(stock_name: str, stock_code: str, fallback_price: float = 0.0):
-        show_dialog_back_button(f"paper_buy_dialog_back_{clean_code(stock_code)}")
+    @st.dialog("모의 매매", width="small")
+    def paper_trade_popup(
+        stock_name: str,
+        stock_code: str,
+        fallback_price: float = 0.0,
+        live_price: float = 0.0,
+    ):
+        show_dialog_back_button(f"paper_trade_dialog_back_{clean_code(stock_code)}")
         if is_remote_storage_enabled() and not is_paper_user_authenticated():
-            st.info("모의 매수는 로그인한 사용자 계정에만 저장됩니다. 왼쪽 메뉴에서 로그인해 주세요.")
+            st.info("모의 매매는 로그인한 사용자 계정에만 저장됩니다. 왼쪽 메뉴에서 로그인해 주세요.")
             return
         code = clean_code(stock_code)
         st.subheader(f"{stock_name} ({code})")
-        st.caption("실제 주문은 전송되지 않습니다. 매수 실행 직전에 현재가를 한 번 더 조회합니다.")
+        st.caption("실제 주문은 전송되지 않습니다.")
 
-        quote_price = 0.0
+        quote_price = safe_float(live_price)
         token = get_access_token()
         if token:
             try:
                 body = get_current_price(token, code)
-                quote_price = safe_float((body.get("output") or {}).get("stck_prpr", 0))
+                rest_price = safe_float((body.get("output") or {}).get("stck_prpr", 0))
+                if rest_price > 0:
+                    quote_price = rest_price
             except Exception:
-                quote_price = 0.0
+                pass
 
-        initial_price = quote_price or safe_float(fallback_price)
+        side_label = st.radio(
+            "구분",
+            ["매수", "매도"],
+            horizontal=True,
+            key=f"paper_trade_side_{code}",
+        )
+        side = "BUY" if side_label == "매수" else "SELL"
         quantity = st.number_input(
             "수량",
             min_value=1,
             value=1,
             step=1,
-            key=f"top30_paper_buy_quantity_{code}",
+            key=f"paper_trade_quantity_{code}",
         )
 
-        if initial_price > 0:
-            st.metric("조회 현재가", f"{initial_price:,.0f}원")
-            st.caption("현재가가 바뀌면 실제 모의 체결가는 매수 실행 시점 가격으로 반영됩니다.")
+        reference_price = quote_price or safe_float(fallback_price)
+        if quote_price > 0:
+            st.metric("조회 현재가", f"{quote_price:,.0f}원")
+        elif reference_price > 0:
+            st.metric("최근 저장 가격", f"{reference_price:,.0f}원")
+            st.warning("실시간 현재가를 확인하지 못했습니다. 이 가격은 매도 체결에 사용하지 않습니다.")
         else:
-            initial_price = st.number_input(
-                "현재가 미수신 · 체결 가격",
-                min_value=1.0,
-                value=1.0,
-                step=100.0,
-                key=f"top30_paper_buy_price_{code}",
-            )
-            st.caption("KIS 현재가를 받지 못했습니다. 입력한 가격으로 모의 체결합니다.")
+            st.warning("현재가를 확인하지 못했습니다.")
 
-        st.metric("예상 주문금액", f"{quantity * initial_price:,.0f}원")
+        use_custom_price = False
+        execution_price = quote_price
+        if side == "BUY":
+            price_mode = st.radio(
+                "체결 단가",
+                ["현재가 사용", "직접 입력"],
+                horizontal=True,
+                key=f"paper_trade_price_mode_{code}",
+            )
+            use_custom_price = price_mode == "직접 입력"
+            if use_custom_price:
+                default_price = reference_price if reference_price > 0 else 1_000.0
+                execution_price = st.number_input(
+                    "모의 매수가",
+                    min_value=1.0,
+                    value=float(default_price),
+                    step=100.0,
+                    key=f"paper_trade_custom_price_{code}",
+                    help="현재가와 다른 과거 매수가를 입력해 손익을 모의로 확인할 수 있습니다.",
+                )
+                if quote_price > 0:
+                    simulated_return = (quote_price / execution_price - 1) * 100
+                    st.caption(f"현재가 {quote_price:,.0f}원 기준 시작 수익률 {simulated_return:+.2f}%")
+            elif quote_price <= 0:
+                st.error("현재가 매수는 실시간 가격을 확인한 뒤 실행할 수 있습니다. 직접 입력을 선택해 주세요.")
+
+        can_submit = execution_price > 0 and (side == "BUY" or quote_price > 0)
+        if execution_price > 0:
+            st.metric("예상 주문금액", f"{quantity * execution_price:,.0f}원")
         if st.button(
-            "이 가격으로 모의 매수",
-            key=f"top30_paper_buy_confirm_{code}",
+            f"모의 {side_label}",
+            key=f"paper_trade_confirm_{code}_{side}",
             type="primary",
             use_container_width=True,
+            disabled=not can_submit,
         ):
-            execution_price = initial_price
-            if token:
+            if not use_custom_price and token:
                 try:
                     body = get_current_price(token, code)
                     latest_price = safe_float((body.get("output") or {}).get("stck_prpr", 0))
@@ -2809,26 +2846,29 @@ def make_top30_paper_buy_dialog():
                         execution_price = latest_price
                 except Exception:
                     pass
+            if execution_price <= 0:
+                st.error("현재가를 확인하지 못해 주문을 취소했습니다. 잠시 후 다시 시도해 주세요.")
+                return
             try:
                 result = place_paper_order(
-                    "BUY",
+                    side,
                     code,
                     stock_name,
                     int(quantity),
                     execution_price,
                 )
                 invalidate_paper_state_cache()
-                st.session_state["top30_paper_order_confirmation"] = (
-                    f"{stock_name} {int(quantity):,}주를 {execution_price:,.0f}원에 모의 매수했습니다. "
+                st.session_state["paper_trade_confirmation"] = (
+                    f"{stock_name} {int(quantity):,}주를 {execution_price:,.0f}원에 모의 {side_label}했습니다. "
                     f"체결금액 {result['amount']:,.0f}원"
                 )
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
             except Exception as exc:
-                st.error(f"모의 매수 처리 중 오류가 발생했습니다: {exc}")
+                st.error(f"모의 {side_label} 처리 중 오류가 발생했습니다: {exc}")
 
-    return paper_buy_popup
+    return paper_trade_popup
 
 
 
@@ -2850,7 +2890,7 @@ def show_today_top(
     if today_df.empty:
         st.warning(f"{selected_date} 기준 추천 데이터가 없습니다. 날짜 형식과 데이터 원본을 확인해 주세요.")
         return
-    order_confirmation = st.session_state.pop("top30_paper_order_confirmation", None)
+    order_confirmation = st.session_state.pop("paper_trade_confirmation", None)
     if order_confirmation:
         st.success(order_confirmation)
 
@@ -3076,14 +3116,15 @@ def show_today_top(
                 if fallback_price > 0:
                     break
         if cols[10].button(
-            "모의 매수",
-            key=f"top30_paper_buy_{selected_date}_{code}",
+            "매수·매도",
+            key=f"top30_paper_trade_{selected_date}_{code}",
             use_container_width=True,
         ):
-            st.session_state["top30_paper_buy_request"] = {
+            st.session_state["paper_trade_request"] = {
                 "stock_name": name,
                 "stock_code": code,
                 "fallback_price": fallback_price,
+                "live_price": signal_price,
             }
             st.rerun()
 
@@ -3097,6 +3138,9 @@ def show_stock_search(
     theme_history_df: pd.DataFrame,
 ):
     st.subheader("종목 검색")
+    order_confirmation = st.session_state.pop("paper_trade_confirmation", None)
+    if order_confirmation:
+        st.success(order_confirmation)
 
     if master_df.empty:
         st.warning("stock_master가 없습니다. 먼저 python stock_master.py 를 실행하세요.")
@@ -3124,6 +3168,27 @@ def show_stock_search(
 
     selected_code = selected.split("(")[1].split(")")[0]
     selected_name = selected.split(" (")[0]
+    selected_prices = score_df[score_df["종목코드"] == clean_code(selected_code)].copy()
+    search_fallback_price = 0.0
+    if not selected_prices.empty:
+        for price_column in ("현재가", "종가", "기준종가"):
+            if price_column in selected_prices.columns:
+                search_fallback_price = safe_float(selected_prices.iloc[-1].get(price_column, 0))
+                if search_fallback_price > 0:
+                    break
+    if st.button(
+        "이 종목 모의 매수·매도",
+        key=f"search_paper_trade_{clean_code(selected_code)}",
+        type="primary",
+        use_container_width=True,
+    ):
+        st.session_state["paper_trade_request"] = {
+            "stock_name": selected_name,
+            "stock_code": selected_code,
+            "fallback_price": search_fallback_price,
+            "live_price": 0.0,
+        }
+        st.rerun()
 
     profile_event_key = f"{keyword.strip()}::{clean_code(selected_code)}"
     if st.session_state.get("last_profile_search_event") != profile_event_key:
@@ -5419,34 +5484,57 @@ def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"
                 live_price = float((body.get("output") or {}).get("stck_prpr", 0) or 0)
             except Exception:
                 live_price = 0.0
+        price_mode = st.radio(
+            "매수 체결 단가",
+            ["현재가 사용", "직접 입력"],
+            horizontal=True,
+            key=f"paper_order_price_mode_{code}",
+            help="직접 입력을 선택하면 현재가와 다른 과거 매수가로 진입한 상태를 만들 수 있습니다.",
+        )
         order_cols = st.columns(3)
         quantity = order_cols[0].number_input("수량", min_value=1, value=1, step=1)
         latest_quote = st.session_state.get("paper_order_live_quotes", {}).get(code, {})
         display_price = safe_float(latest_quote.get("price", 0)) or live_price
         with order_cols[1]:
             show_paper_order_live_price(code, live_price)
-            if display_price > 0:
-                price = display_price
-            else:
+            if price_mode == "직접 입력":
+                default_price = display_price if display_price > 0 else 1_000.0
                 price = st.number_input(
-                    "현재가 미수신 · 체결 가격",
+                    "모의 매수가",
                     min_value=1.0,
-                    value=1.0,
+                    value=float(default_price),
                     step=100.0,
+                    key=f"paper_order_custom_price_{code}",
                 )
-                st.caption("KIS 연결을 확인해 주세요. 체결 시 현재가를 다시 조회합니다.")
-        order_cols[2].metric("예상 주문금액", f"{quantity * price:,.0f}원")
+                if display_price > 0:
+                    simulated_return = (display_price / price - 1) * 100
+                    st.caption(f"현재가 기준 시작 수익률 {simulated_return:+.2f}%")
+            else:
+                price = display_price
+                if display_price <= 0:
+                    st.error("현재가를 확인하지 못했습니다. 현재가 주문은 잠시 후 다시 시도해 주세요.")
+        if price > 0:
+            order_cols[2].metric("예상 주문금액", f"{quantity * price:,.0f}원")
+        else:
+            order_cols[2].metric("예상 주문금액", "계산 대기")
 
         def execute_paper_order(side):
             try:
-                execution_price = price
-                if order_token:
-                    latest_body = get_current_price(order_token, code)
-                    latest_price = float(
-                        (latest_body.get("output") or {}).get("stck_prpr", 0) or 0
-                    )
-                    if latest_price > 0:
-                        execution_price = latest_price
+                use_custom_buy_price = side == "BUY" and price_mode == "직접 입력"
+                execution_price = price if use_custom_buy_price else display_price
+                if not use_custom_buy_price and order_token:
+                    try:
+                        latest_body = get_current_price(order_token, code)
+                        latest_price = float(
+                            (latest_body.get("output") or {}).get("stck_prpr", 0) or 0
+                        )
+                        if latest_price > 0:
+                            execution_price = latest_price
+                    except Exception:
+                        pass
+                if execution_price <= 0:
+                    st.error("현재가를 확인하지 못해 주문을 취소했습니다. 1원 등 임시 가격으로는 체결하지 않습니다.")
+                    return
                 result = place_paper_order(
                     side,
                     code,
@@ -5473,12 +5561,14 @@ def show_paper_trading(master_df, current_df, supply_df, section="모의 주문"
             key="paper_buy_button",
             type="primary",
             use_container_width=True,
+            disabled=price <= 0,
         ):
             execute_paper_order("BUY")
         if sell_col.button(
             "매도",
             key="paper_sell_button",
             use_container_width=True,
+            disabled=display_price <= 0,
         ):
             execute_paper_order("SELL")
     else:
@@ -5943,13 +6033,14 @@ def main():
             theme_history_df=table("stock_theme_history"),
             selected_date=selected_date,
         )
-        paper_buy_request = st.session_state.pop("top30_paper_buy_request", None)
-        if paper_buy_request:
-            paper_buy_popup = make_top30_paper_buy_dialog()
-            paper_buy_popup(
-                paper_buy_request["stock_name"],
-                paper_buy_request["stock_code"],
-                paper_buy_request["fallback_price"],
+        paper_trade_request = st.session_state.pop("paper_trade_request", None)
+        if paper_trade_request:
+            paper_trade_popup = make_paper_trade_dialog()
+            paper_trade_popup(
+                paper_trade_request["stock_name"],
+                paper_trade_request["stock_code"],
+                paper_trade_request["fallback_price"],
+                paper_trade_request.get("live_price", 0.0),
             )
         return
 
@@ -5968,6 +6059,15 @@ def main():
             classification_df=table("stock_classification"),
             theme_history_df=table("stock_theme_history"),
         )
+        paper_trade_request = st.session_state.pop("paper_trade_request", None)
+        if paper_trade_request:
+            paper_trade_popup = make_paper_trade_dialog()
+            paper_trade_popup(
+                paper_trade_request["stock_name"],
+                paper_trade_request["stock_code"],
+                paper_trade_request["fallback_price"],
+                paper_trade_request.get("live_price", 0.0),
+            )
         return
 
     if menu == "과거 분석":
